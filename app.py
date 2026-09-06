@@ -17,10 +17,10 @@ st.set_page_config(
 st.title("🌐 거시경제 지표 기반 환율 예측 대시보드")
 st.caption("미국 달러 대 원화(USDKRW) 및 라리화(USDGEL) 4주 추세 분석 모델")
 
-# 2. 금융 데이터 로드 (캐싱을 적용해 1시간마다 데이터 갱신)
+# 2. 금융 데이터 로드 (yf.download 일괄 수집으로 안정성 확보)
 @st.cache_data(ttl=3600)
 def load_market_data():
-    tickers = {
+    ticker_map = {
         'USDKRW': 'KRW=X',
         'USDGEL': 'GEL=X',
         'TNX': '^TNX',     # 미 10년물 국채 금리
@@ -29,15 +29,20 @@ def load_market_data():
         'SPX': '^GSPC'     # S&P 500 지수
     }
     
-    df = pd.DataFrame()
-    for name, symbol in tickers.items():
-        data = yf.Ticker(symbol).history(period="3y")['Close']
-        df[name] = data
-        
+    symbols = list(ticker_map.values())
+    
+    # 여러 티커를 한 번에 수집하여 차원/날짜 정렬 오류 방지
+    raw_data = yf.download(symbols, period="3y", progress=False)['Close']
+    
+    # 컬럼 이름을 한글/알기 쉬운 명칭 매핑용 영문으로 변경
+    inv_map = {v: k for k, v in ticker_map.items()}
+    df = raw_data.rename(columns=inv_map)
+    
+    # 앞/뒤 결측치 보완
     df = df.ffill().bfill()
     return df
 
-# 3. AI 모델 학습 및 예측 함수 (RandomForestClassifier)
+# 3. AI 모델 학습 및 예측 함수
 def train_and_predict(data, target_symbol):
     df = data.copy()
     
@@ -51,13 +56,24 @@ def train_and_predict(data, target_symbol):
     df['Target'] = (df[target_symbol].shift(-20) > df[target_symbol]).astype(int)
     
     features = ['TNX_Ret_4W', 'VIX_Level', 'Oil_Ret_4W', 'SPX_Ret_4W']
-    df = df.dropna()
     
-    X = df[features]
-    y = df['Target']
+    # 모델에 필요한 컬럼만 추출 후 결측치 제거
+    df_model = df[features + ['Target']].dropna()
     
-    # 시계열 교차 검증 평가 (TimeSeriesSplit)
-    tscv = TimeSeriesSplit(n_splits=3)
+    X = df_model[features]
+    y = df_model['Target']
+    
+    n_samples = len(X)
+    feature_labels = ['10년물 금리 변동률', 'VIX 수준', '유가 변동률', 'S&P500 변동률']
+    
+    # 샘플 수가 부족할 경우 예외 방지 안전 장치
+    if n_samples < 10:
+        return 0.5, 0.50, pd.Series([0.25]*4, index=feature_labels)
+        
+    # 샘플 수에 맞게 n_splits 동적 조절 (최대 3개, 최소 2개)
+    n_splits = min(3, max(2, n_samples // 30))
+    
+    tscv = TimeSeriesSplit(n_splits=n_splits)
     model = RandomForestClassifier(n_estimators=100, random_state=42, max_depth=5)
     
     scores = []
@@ -72,13 +88,13 @@ def train_and_predict(data, target_symbol):
     latest_x = X.iloc[[-1]]
     
     prob_up = model.predict_proba(latest_x)[0][1]
-    accuracy = np.mean(scores)
-    feature_imp = pd.Series(model.feature_importances_, index=['10년물 금리 변동률', 'VIX 수준', '유가 변동률', 'S&P500 변동률'])
+    accuracy = np.mean(scores) if scores else 0.50
+    feature_imp = pd.Series(model.feature_importances_, index=feature_labels)
     
     return prob_up, accuracy, feature_imp
 
 # 4. 화면 출력 부분
-with st.spinner("최신 마켓 데이터 분석 및 예측 모델 가동 중..."):
+with st.spinner("최신 마켓 데이터 수집 및 예측 모델 실행 중..."):
     df = load_market_data()
     krw_prob, krw_acc, krw_imp = train_and_predict(df, 'USDKRW')
     gel_prob, gel_acc, gel_imp = train_and_predict(df, 'USDGEL')
