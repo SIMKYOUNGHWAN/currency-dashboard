@@ -1,12 +1,11 @@
 import streamlit as st
 import matplotlib
-matplotlib.use('Agg')  # Streamlit Cloud 서버 튕김 방지 (최상단 배치 필수)
+matplotlib.use('Agg')  # Streamlit Cloud 서버 튕김 방지 (최상단 배치)
 import matplotlib.pyplot as plt
 
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import platform
 import requests
 import urllib3
 from concurrent.futures import ThreadPoolExecutor
@@ -39,15 +38,33 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("🌐 거시경제 지표 기반 환율 예측 대시보드")
-st.caption("미국 달러 대 원화(USDKRW) 및 조지아 라리화(USDGEL - NBG 공식 연동) 4주 추세 분석 모델")
+st.title("🌐 거시경제 지표 기반 환율 예측 대시보드 (고도화 모델)")
+st.caption("미국 달러 대 원화(USDKRW) 및 조지아 라리화(USDGEL - NBG 연동) AI 분석 및 실시간 시뮬레이터")
 
-# 데이터 캐시 비우기 버튼
+# 3. 사이드바 - 설정 및 시나리오 시뮬레이터 (What-If)
+st.sidebar.header("🎛️ 예측 설정 및 시뮬레이션")
+
+horizon_weeks = st.sidebar.selectbox(
+    "⏱️ 예측 타임프레임 선택",
+    options=[1, 2, 4],
+    index=2,
+    format_func=lambda x: f"{x}주일 후 ({x*5}영업일)"
+)
+horizon_days = horizon_weeks * 5
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🧪 실시간 시나리오 시뮬레이터")
+st.sidebar.caption("거시경제 변수가 급변할 때 AI 예측 확률의 변화를 실시간으로 테스트합니다.")
+
+oil_shift = st.sidebar.slider("WTI 원유 가격 변동 충격 (%)", -20.0, 20.0, 0.0, step=1.0) / 100.0
+tnx_shift = st.sidebar.slider("미 10년물 금리 변동 충격 (%)", -20.0, 20.0, 0.0, step=1.0) / 100.0
+dxy_shift = st.sidebar.slider("달러 인덱스(DXY) 변동 충격 (%)", -10.0, 10.0, 0.0, step=0.5) / 100.0
+
 if st.sidebar.button("🔄 데이터 캐시 강제 리셋"):
     st.cache_data.clear()
     st.rerun()
 
-# 3. 보조지표 계산 함수 (RSI)
+# 4. 보조지표 계산 함수 (RSI)
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).ewm(alpha=1/period, adjust=False).mean()
@@ -55,14 +72,11 @@ def calculate_rsi(series, period=14):
     rs = gain / (loss + 1e-9)
     return 100 - (100 / (1 + rs))
 
-# 4. 조지아 중앙은행(NBG) 단일 날짜 환율 수집 함수
+# 5. 조지아 중앙은행(NBG) 수집 함수
 def fetch_nbg_single_date(dt):
     date_str = dt.strftime("%Y-%m-%d")
     url = f"https://nbg.gov.ge/gw/api/ct/monetarypolicy/currencies/en/json/?date={date_str}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
-    
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
         res = requests.get(url, headers=headers, timeout=5, verify=False)
         if res.status_code == 200:
@@ -75,37 +89,27 @@ def fetch_nbg_single_date(dt):
         pass
     return dt, None
 
-# 5. NBG 데이터를 병렬 수집하여 타겟 시계열 인덱스에 맞추는 함수
 def fetch_usdgel_series(target_index):
     if len(target_index) == 0:
         return pd.Series(dtype=float)
-        
     start_date = target_index.min()
     end_date = target_index.max()
-    
     sample_dates = pd.date_range(start=start_date, end=end_date, freq="3D")
-    
     records = {}
     with ThreadPoolExecutor(max_workers=15) as executor:
         results = executor.map(fetch_nbg_single_date, sample_dates)
         for dt, rate in results:
             if rate is not None:
                 records[dt] = rate
-
     if records:
         s = pd.Series(records).sort_index()
         s.index = pd.to_datetime(s.index).tz_localize(None)
-        
         full_idx = s.index.union(target_index)
-        s_interpolated = (
-            s.reindex(full_idx)
-            .interpolate(method="time")
-            .reindex(target_index)
-            .ffill()
-            .bfill()
-        )
-        return s_interpolated
-
+        return (s.reindex(full_idx)
+                .interpolate(method="time")
+                .reindex(target_index)
+                .ffill()
+                .bfill())
     try:
         url = "https://open.er-api.com/v6/latest/USD"
         res = requests.get(url, timeout=5).json()
@@ -114,7 +118,7 @@ def fetch_usdgel_series(target_index):
         base_rate = 2.70
     return pd.Series(base_rate, index=target_index)
 
-# 6. 전체 마켓 데이터 로드 (최근 3년)
+# 6. 마켓 데이터 수집 (위안화 USDCNY 추가)
 @st.cache_data(ttl=600)
 def load_market_data():
     ticker_map = {
@@ -124,63 +128,61 @@ def load_market_data():
         'Oil': 'CL=F',     # WTI 원유 선물
         'SPX': '^GSPC',    # S&P 500 지수
         'DXY': 'DX-Y.NYB', # 달러 인덱스
-        'SOX': '^SOX'      # 필라델피아 반도체 지수 (수출 여건 대리 지표)
+        'SOX': '^SOX',     # 필라델피아 반도체 지수
+        'USDCNY': 'CNY=X'  # 중국 위안화 (원화 커플링 대리 지표)
     }
-    
     symbols = list(ticker_map.values())
     raw_data = yf.download(symbols, period="3y", progress=False)['Close']
-    
     inv_map = {v: k for k, v in ticker_map.items()}
     df = raw_data.rename(columns=inv_map)
     df.index = pd.to_datetime(df.index).tz_localize(None)
-    
     df['USDGEL'] = fetch_usdgel_series(df.index)
     df = df.interpolate(method='time', limit_direction='both').ffill().bfill()
     return df
 
-# 7. AI 모델 학습 및 예측 함수 (기술적 지표 + 피처 강화 및 과적합 방지)
-def train_and_predict(data, target_symbol):
+# 7. AI 모델 학습 및 시나리오 시뮬레이션 연동 함수
+def train_and_predict(data, target_symbol, horizon_days, oil_s=0.0, tnx_s=0.0, dxy_s=0.0):
     df_temp = data.copy()
     
-    # Target 환율 자체의 기술적 지표 피처 생성
+    # Target 환율 기술적 지표 피처
     df_temp['Target_Ret_1W'] = df_temp[target_symbol].pct_change(5)
-    df_temp['Target_Ret_4W'] = df_temp[target_symbol].pct_change(20)
+    df_temp['Target_Ret_H'] = df_temp[target_symbol].pct_change(horizon_days)
     df_temp['Target_MA_Ratio'] = df_temp[target_symbol] / df_temp[target_symbol].rolling(20).mean()
     df_temp['Target_RSI'] = calculate_rsi(df_temp[target_symbol], 14)
     
-    # 매크로 및 무역 여건 지표
-    df_temp['TNX_Ret_4W'] = df_temp['TNX'].pct_change(20)
+    # 거시경제 및 무역 여건, 위안화 피처
+    df_temp['TNX_Ret_H'] = df_temp['TNX'].pct_change(horizon_days)
     df_temp['VIX_Level'] = df_temp['VIX']
-    df_temp['Oil_Ret_4W'] = df_temp['Oil'].pct_change(20)
-    df_temp['SPX_Ret_4W'] = df_temp['SPX'].pct_change(20)
-    df_temp['DXY_Ret_4W'] = df_temp['DXY'].pct_change(20)
-    df_temp['Trade_Proxy_Ret'] = (df_temp['SOX'] / df_temp['Oil']).pct_change(20)
+    df_temp['Oil_Ret_H'] = df_temp['Oil'].pct_change(horizon_days)
+    df_temp['SPX_Ret_H'] = df_temp['SPX'].pct_change(horizon_days)
+    df_temp['DXY_Ret_H'] = df_temp['DXY'].pct_change(horizon_days)
+    df_temp['CNY_Ret_H'] = df_temp['USDCNY'].pct_change(horizon_days)
+    df_temp['Trade_Proxy_Ret'] = (df_temp['SOX'] / df_temp['Oil']).pct_change(horizon_days)
     
-    # 4주(20영업일) 후 상승 여부 Target
-    df_temp['Target'] = (df_temp[target_symbol].shift(-20) > df_temp[target_symbol]).astype(int)
+    # 선택한 타임프레임 후 상승 여부 Target
+    df_temp['Target'] = (df_temp[target_symbol].shift(-horizon_days) > df_temp[target_symbol]).astype(int)
     
     features = [
-        'Target_Ret_1W', 'Target_Ret_4W', 'Target_MA_Ratio', 'Target_RSI',
-        'TNX_Ret_4W', 'VIX_Level', 'Oil_Ret_4W', 'SPX_Ret_4W', 'DXY_Ret_4W', 'Trade_Proxy_Ret'
+        'Target_Ret_1W', 'Target_Ret_H', 'Target_MA_Ratio', 'Target_RSI',
+        'TNX_Ret_H', 'VIX_Level', 'Oil_Ret_H', 'SPX_Ret_H', 'DXY_Ret_H', 'CNY_Ret_H', 'Trade_Proxy_Ret'
     ]
     feature_labels = [
-        '1W Return', '4W Return', '20D MA Ratio', 'RSI Index',
-        '10Y Yield', 'VIX Index', 'WTI Oil', 'S&P 500', 'Dollar Index', 'Trade Proxy'
+        '1W Return', f'{horizon_weeks}W Return', '20D MA Ratio', 'RSI Index',
+        '10Y Yield', 'VIX Index', 'WTI Oil', 'S&P 500', 'Dollar Index', 'USD/CNY', 'Trade Proxy'
     ]
     
     df_model = df_temp[features + ['Target']].dropna()
-    
     X = df_model[features]
     y = df_model['Target']
     
     n_samples = len(X)
     if n_samples < 20 or len(np.unique(y)) < 2:
-        return 0.5, 0.50, pd.Series([0.1]*10, index=feature_labels)
+        return 0.5, 0.50, pd.Series([0.1]*len(features), index=feature_labels)
         
     n_splits = min(4, max(2, n_samples // 40))
     tscv = TimeSeriesSplit(n_splits=n_splits)
     
-    # 과적합을 막기 위해 max_depth를 3으로 제한 및 min_samples_leaf 설정
+    # 과적합 방지 규제
     model = RandomForestClassifier(
         n_estimators=150, 
         max_depth=3, 
@@ -192,14 +194,20 @@ def train_and_predict(data, target_symbol):
     for train_idx, test_idx in tscv.split(X):
         X_tr, X_te = X.iloc[train_idx], X.iloc[test_idx]
         y_tr, y_te = y.iloc[train_idx], y.iloc[test_idx]
-        
         if len(np.unique(y_tr)) >= 2:
             model.fit(X_tr, y_tr)
             scores.append(accuracy_score(y_te, model.predict(X_te)))
-        
+            
     model.fit(X, y)
-    latest_x = X.iloc[[-1]]
     
+    # 최신 데이터에 시나리오 충격 적용
+    latest_x = X.iloc[[-1]].copy()
+    latest_x['Oil_Ret_H'] += oil_s
+    latest_x['TNX_Ret_H'] += tnx_s
+    latest_x['DXY_Ret_H'] += dxy_s
+    if oil_s != 0.0:
+        latest_x['Trade_Proxy_Ret'] -= oil_s * 0.5
+        
     classes = list(model.classes_)
     if 1 in classes:
         idx_1 = classes.index(1)
@@ -212,13 +220,13 @@ def train_and_predict(data, target_symbol):
     
     return prob_up, accuracy, feature_imp
 
-# 8. 메인 데이터 처리 및 리포트 화면 구현
-with st.spinner("조지아 중앙은행(NBG) 및 글로벌 마켓 데이터 수집 중..."):
+# 8. 메인 데이터 처리 및 화면 구현
+with st.spinner("마켓 및 NBG 데이터를 수집하여 AI 모델을 재학습 중입니다..."):
     df = load_market_data()
-    krw_prob, krw_acc, krw_imp = train_and_predict(df, 'USDKRW')
-    gel_prob, gel_acc, gel_imp = train_and_predict(df, 'USDGEL')
+    krw_prob, krw_acc, krw_imp = train_and_predict(df, 'USDKRW', horizon_days, oil_shift, tnx_shift, dxy_shift)
+    gel_prob, gel_acc, gel_imp = train_and_predict(df, 'USDGEL', horizon_days, oil_shift, tnx_shift, dxy_shift)
 
-# 파생 지표 전체 3년 데이터에 계산
+# 파생 지표 전체 3년 계산
 df['KRW_MA20'] = df['USDKRW'].rolling(20).mean()
 df['KRW_MA60'] = df['USDKRW'].rolling(60).mean()
 df['GEL_MA20'] = df['USDGEL'].rolling(20).mean()
@@ -230,22 +238,26 @@ df['GEL_RSI'] = calculate_rsi(df['USDGEL'], 14)
 df['KRW_Vol'] = df['USDKRW'].pct_change().rolling(20).std() * np.sqrt(252) * 100
 df['GEL_Vol'] = df['USDGEL'].pct_change().rolling(20).std() * np.sqrt(252) * 100
 
+# 시나리오 설정 시 안내 표시
+if oil_shift != 0.0 or tnx_shift != 0.0 or dxy_shift != 0.0:
+    st.warning(f"⚠️ **실시간 시나리오 적용 중**: WTI({oil_shift*100:+.1f}%), 금리({tnx_shift*100:+.1f}%), DXY({dxy_shift*100:+.1f}%) 충격을 반영한 예측 결과입니다.")
+
 # KPI 요약 카드
-st.subheader("📌 4주 후 환율 방향성 AI 예측 확률")
+st.subheader(f"📌 {horizon_weeks}주 후 환율 방향성 AI 예측 확률")
 c1, c2, c3, c4 = st.columns(4)
 
 curr_krw = df['USDKRW'].iloc[-1]
 curr_gel = df['USDGEL'].iloc[-1]
 
 c1.metric("현재 USDKRW", f"{curr_krw:,.2f} 원")
-c2.metric("USDKRW(환율) 상승 확률", f"{krw_prob*100:.1f}%", delta=f"검증 정확도 {krw_acc*100:.1f}%")
+c2.metric(f"USDKRW ({horizon_weeks}주 후) 상승 확률", f"{krw_prob*100:.1f}%", delta=f"검증 정확도 {krw_acc*100:.1f}%")
 
 c3.metric("현재 USDGEL (NBG)", f"{curr_gel:,.4f} GEL")
-c4.metric("USDGEL(환율) 상승 확률", f"{gel_prob*100:.1f}%", delta=f"검증 정확도 {gel_acc*100:.1f}%")
+c4.metric(f"USDGEL ({horizon_weeks}주 후) 상승 확률", f"{gel_prob*100:.1f}%", delta=f"검증 정확도 {gel_acc*100:.1f}%")
 
 st.markdown("---")
 
-# 1) 타겟 환율 추이 그래프 (최근 3년 전체)
+# 1) 타겟 환율 추이 그래프 (최근 3년)
 st.subheader("📈 타겟 환율 추이 및 이동평균선 (최근 3년)")
 col_fx1, col_fx2 = st.columns(2)
 
@@ -275,38 +287,33 @@ with col_fx2:
 
 st.markdown("---")
 
-# 2) 한국 수출입 여건과 원/달러 환율 메커니즘 (최근 3년 전체)
-st.subheader("🚢 한국 수출입 무역 여건(Trade Proxy)과 환율 메커니즘 (최근 3년)")
-st.caption("⬛ **검은색 (좌측 Y축)**: 원/달러 환율 (USDKRW) | 🟦 **파란색 점선 (우측 Y축)**: 무역 여건 지수 (반도체 SOX / WTI 유가)")
+# 2) 무역 여건 & 위안화 동향 그래프 (최근 3년)
+st.subheader("🚢 한국 무역 여건(Trade Proxy) 및 위안화(USDCNY) 커플링")
+st.caption("⬛ **검은색 (좌측 Y축)**: USDKRW | 🟦 **파란색 점선 (우측 Y축)**: 무역 여건 지수 (SOX/Oil) | 🔴 **빨간색 점선 (우측 Y축)**: USDCNY 환율")
 
 fig_trade, ax_krw_t = plt.subplots(figsize=(12, 4))
 ax_trade = ax_krw_t.twinx()
 
 line_krw = ax_krw_t.plot(df.index, df['USDKRW'], color='black', label='USDKRW Exchange Rate', linewidth=1.5)
-line_trade = ax_trade.plot(df.index, df['Trade_Proxy'], color='dodgerblue', linestyle='--', label='Trade Proxy Index (SOX/Oil)', linewidth=1.5)
+line_trade = ax_trade.plot(df.index, df['Trade_Proxy'], color='dodgerblue', linestyle='--', label='Trade Proxy (SOX/Oil)', linewidth=1.3)
+line_cny = ax_trade.plot(df.index, df['USDCNY'], color='crimson', linestyle=':', label='USDCNY Exchange Rate', linewidth=1.3)
 
 ax_krw_t.set_ylabel('USDKRW Rate', color='black')
-ax_trade.set_ylabel('Trade Proxy (SOX / Oil)', color='dodgerblue')
+ax_trade.set_ylabel('Trade Proxy / USDCNY', color='dodgerblue')
 
-ax_krw_t.tick_params(axis='y', labelcolor='black')
-ax_trade.tick_params(axis='y', labelcolor='dodgerblue')
-
-lines_t = line_krw + line_trade
+lines_t = line_krw + line_trade + line_cny
 labels_t = [l.get_label() for l in lines_t]
 ax_krw_t.legend(lines_t, labels_t, loc='upper left', frameon=True, facecolor='white', framealpha=0.9)
 ax_krw_t.grid(True, linestyle='--', alpha=0.3)
-plt.title("Korea Trade Proxy vs USDKRW (Export-Import Conditions)", fontsize=12, pad=10)
+plt.title("Trade Proxy & USDCNY Coupling vs USDKRW", fontsize=12, pad=10)
 fig_trade.tight_layout()
 
 st.pyplot(fig_trade)
-st.info("💡 **원리 해설**: 무역 여건 지수(파란 점선)가 상승한다는 것은 **수출 업황(반도체)이 호조를 보이고 수입 비용(유가)이 낮아져 무역 흑자 가능성이 커짐**을 뜻합니다. 달러 유입이 늘어나므로 원/달러 환율(검은 실선)은 보통 **반대로 하락(원화 강세)**하는 정반대의 움직임(역상관)을 보입니다.")
 
 st.markdown("---")
 
-# 3) 주요 매크로 지표 추이 (최근 3년 전체)
+# 3) 주요 매크로 지표 추이 (최근 3년)
 st.subheader("📊 주요 매크로 지표 추이 (최근 3년)")
-st.caption("🟦 **파란색 (좌측 Y축)**: 미 10년물 국채 금리 (TNX) | 🟧 **주황색 점선 (우측1 Y축)**: VIX 변동성 지수 | 🟩 **초록색 점선 (우측2 Y축)**: WTI 원유 가격 ($)")
-
 fig, ax1 = plt.subplots(figsize=(12, 4))
 
 color1 = '#1f77b4'
@@ -339,74 +346,16 @@ st.pyplot(fig)
 
 st.markdown("---")
 
-# 4) 달러 인덱스 & 미국 증시 추이 (최근 3년 전체)
-st.subheader("💵 달러 인덱스 (DXY) 및 미국 증시 (S&P 500) 추이 (최근 3년)")
-st.caption("🟪 **보라색 (좌측 Y축)**: 달러 인덱스 (DXY) | 🌲 **진초록색 점선 (우측 Y축)**: S&P 500 지수")
-
-fig_dxy, ax_dxy = plt.subplots(figsize=(12, 4))
-ax_spx = ax_dxy.twinx()
-
-color_dxy = 'purple'
-color_spx = 'darkgreen'
-
-line_dxy = ax_dxy.plot(df.index, df['DXY'], color=color_dxy, label='Dollar Index (DXY)', linewidth=1.5)
-line_spx = ax_spx.plot(df.index, df['SPX'], color=color_spx, linestyle='--', label='S&P 500 Index', linewidth=1.2)
-
-ax_dxy.set_ylabel('DXY Index', color=color_dxy)
-ax_spx.set_ylabel('S&P 500 Index', color=color_spx)
-ax_dxy.tick_params(axis='y', labelcolor=color_dxy)
-ax_spx.tick_params(axis='y', labelcolor=color_spx)
-
-lines_macro = line_dxy + line_spx
-labels_macro = [l.get_label() for l in lines_macro]
-ax_dxy.legend(lines_macro, labels_macro, loc='upper left', frameon=True, facecolor='white', framealpha=0.9)
-ax_dxy.grid(True, linestyle='--', alpha=0.3)
-fig_dxy.tight_layout()
-
-st.pyplot(fig_dxy)
-
-st.markdown("---")
-
-# 5) 기술적 보조지표 (최근 3년 전체)
-st.subheader("📉 기술적 보조지표 분석 (RSI & 연율화 변동성)")
-col_rsi, col_vol = st.columns(2)
-
-with col_rsi:
-    fig_rsi, ax_rsi = plt.subplots(figsize=(6, 3))
-    ax_rsi.plot(df.index, df['KRW_RSI'], color='black', linewidth=1.2, label='KRW RSI(14)')
-    ax_rsi.plot(df.index, df['GEL_RSI'], color='navy', linewidth=1.2, label='GEL RSI(14)')
-    ax_rsi.axhline(70, color='red', linestyle='--', alpha=0.6, label='Overbought (70)')
-    ax_rsi.axhline(30, color='blue', linestyle='--', alpha=0.6, label='Oversold (30)')
-    ax_rsi.set_title("RSI (Overbought / Oversold)", fontsize=11, pad=8)
-    ax_rsi.grid(True, linestyle='--', alpha=0.3)
-    ax_rsi.legend(loc='upper left', fontsize=8)
-    fig_rsi.autofmt_xdate(rotation=30)
-    fig_rsi.tight_layout()
-    st.pyplot(fig_rsi)
-
-with col_vol:
-    fig_vol, ax_vol = plt.subplots(figsize=(6, 3))
-    ax_vol.plot(df.index, df['KRW_Vol'], color='teal', linewidth=1.2, label='KRW Volatility')
-    ax_vol.plot(df.index, df['GEL_Vol'], color='darkslateblue', linewidth=1.2, label='GEL Volatility')
-    ax_vol.set_title("20-Day Annualized Volatility (%)", fontsize=11, pad=8)
-    ax_vol.grid(True, linestyle='--', alpha=0.3)
-    ax_vol.legend(loc='upper left', fontsize=8)
-    fig_vol.autofmt_xdate(rotation=30)
-    fig_vol.tight_layout()
-    st.pyplot(fig_vol)
-
-st.markdown("---")
-
-# 6) 변수 중요도 분석
+# 4) 기술적 보조지표 및 변수 중요도
 st.subheader("🔍 변수 중요도 분석 (Feature Importance)")
 col_a, col_b = st.columns(2)
 
 with col_a:
-    st.write("**USDKRW 영향 변수**")
+    st.write(f"**USDKRW ({horizon_weeks}주 후 예측) 영향 변수**")
     st.bar_chart(krw_imp)
 
 with col_b:
-    st.write("**USDGEL 영향 변수**")
+    st.write(f"**USDGEL ({horizon_weeks}주 후 예측) 영향 변수**")
     st.bar_chart(gel_imp)
 
-st.caption("데이터 출처: Yahoo Finance & National Bank of Georgia (NBG) | 매시간 자동으로 최신 시장 데이터를 수집하여 업데이트합니다.")
+st.caption("데이터 출처: Yahoo Finance & National Bank of Georgia (NBG) | 실시간 시장 데이터를 반영하여 동적으로 재학습됩니다.")
