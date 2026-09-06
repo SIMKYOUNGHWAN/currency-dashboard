@@ -1,8 +1,8 @@
-streamlit>=1.30.0
-yfinance>=0.2.35
-pandas>=2.0.0
-numpy>=1.24.0
-scikit-learn>=1.3.0
-matplotlib>=3.7.0
-requests>=2.31.0
-fonts-nanum
+streamlit
+yfinance
+pandas
+numpy
+matplotlib
+requests
+urllib3
+scikit-learn
