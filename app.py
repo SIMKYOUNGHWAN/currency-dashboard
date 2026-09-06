@@ -111,26 +111,37 @@ c4.metric("USDGEL(환율) 상승 확률", f"{gel_prob*100:.1f}%", delta=f"검증
 
 st.markdown("---")
 
-# 매크로 지표 독립 다중 Y축 그래프 시각화 (영문 라벨 적용으로 깨짐 방지)
+# 추가 1: 실제 대상 환율 추이 그래프 (최근 6개월)
+st.subheader("📈 타겟 환율 추이 (최근 6개월)")
+col_fx1, col_fx2 = st.columns(2)
+
+with col_fx1:
+    st.write("**USDKRW (원/달러)**")
+    st.line_chart(df['USDKRW'].iloc[-120:], color="#1f77b4")
+
+with col_fx2:
+    st.write("**USDGEL (라리/달러)**")
+    st.line_chart(df['USDGEL'].iloc[-120:], color="#ff7f0e")
+
+st.markdown("---")
+
+# 매크로 지표 독립 다중 Y축 그래프 시각화
 st.subheader("📊 주요 매크로 지표 추이 (독립 Y축 그래프)")
 
-fig, ax1 = plt.subplots(figsize=(12, 5))
+fig, ax1 = plt.subplots(figsize=(12, 4.5))
 
-# 축 1: TNX (금리)
 color1 = '#1f77b4'
 ax1.set_xlabel('Date')
 ax1.set_ylabel('US 10Y Treasury (%)', color=color1)
 ax1.plot(df.index[-120:], df['TNX'].iloc[-120:], color=color1, label='TNX (%)', linewidth=2)
 ax1.tick_params(axis='y', labelcolor=color1)
 
-# 축 2: VIX (변동성)
 ax2 = ax1.twinx()
 color2 = '#ff7f0e'
 ax2.set_ylabel('VIX Index', color=color2)
 ax2.plot(df.index[-120:], df['VIX'].iloc[-120:], color=color2, label='VIX', linewidth=1.5, linestyle='--')
 ax2.tick_params(axis='y', labelcolor=color2)
 
-# 축 3: Oil (원유)
 ax3 = ax1.twinx()
 ax3.spines["right"].set_position(("axes", 1.12))
 color3 = '#2ca02c'
@@ -138,7 +149,7 @@ ax3.set_ylabel('WTI Oil ($/bbl)', color=color3)
 ax3.plot(df.index[-120:], df['Oil'].iloc[-120:], color=color3, label='WTI Oil ($)', linewidth=1.5, linestyle=':')
 ax3.tick_params(axis='y', labelcolor=color3)
 
-plt.title("Recent 6-Month Macro Trends", fontsize=13, pad=10)
+plt.title("Recent 6-Month Macro Trends (TNX, VIX, WTI Oil)", fontsize=12, pad=10)
 fig.tight_layout()
 
 st.pyplot(fig)
