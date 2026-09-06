@@ -37,7 +37,7 @@ def load_market_data():
     df = df.ffill().bfill()
     return df
 
-# 3. AI 모델 학습 및 예측 함수 (에러 방지 로직 보완)
+# 3. AI 모델 학습 및 예측 함수
 def train_and_predict(data, target_symbol):
     df = data.copy()
     
@@ -57,9 +57,8 @@ def train_and_predict(data, target_symbol):
     y = df_model['Target']
     
     n_samples = len(X)
-    feature_labels = ['10년물 금리 변동률', 'VIX 수준', '유가 변동률', 'S&P500 변동률']
+    feature_labels = ['10Y Yield', 'VIX Index', 'WTI Oil', 'S&P 500']
     
-    # [안전장치 1] 샘플 수가 부족하거나 타깃 클래스가 1개뿐인 경우 기본값 반환
     if n_samples < 10 or len(np.unique(y)) < 2:
         return 0.5, 0.50, pd.Series([0.25]*4, index=feature_labels)
         
@@ -72,16 +71,13 @@ def train_and_predict(data, target_symbol):
         X_tr, X_te = X.iloc[train_idx], X.iloc[test_idx]
         y_tr, y_te = y.iloc[train_idx], y.iloc[test_idx]
         
-        # 교차 검증 분할 내부에서 단일 클래스 현상 방지
         if len(np.unique(y_tr)) >= 2:
             model.fit(X_tr, y_tr)
             scores.append(accuracy_score(y_te, model.predict(X_te)))
         
-    # 전체 데이터로 최종 모델 학습
     model.fit(X, y)
     latest_x = X.iloc[[-1]]
     
-    # [안전장치 2] 클래스 위치를 동적으로 파악하여 상승(1) 확률 안전 추출
     classes = list(model.classes_)
     if 1 in classes:
         idx_1 = classes.index(1)
@@ -108,29 +104,29 @@ curr_krw = df['USDKRW'].iloc[-1]
 curr_gel = df['USDGEL'].iloc[-1]
 
 c1.metric("현재 USDKRW", f"{curr_krw:,.2f} 원")
-c2.metric("원화 상승(상승률) 확률", f"{krw_prob*100:.1f}%", delta=f"검증 정확도 {krw_acc*100:.1f}%")
+c2.metric("USDKRW(환율) 상승 확률", f"{krw_prob*100:.1f}%", delta=f"검증 정확도 {krw_acc*100:.1f}%")
 
 c3.metric("현재 USDGEL", f"{curr_gel:,.4f} GEL")
-c4.metric("라리화 상승(상승률) 확률", f"{gel_prob*100:.1f}%", delta=f"검증 정확도 {gel_acc*100:.1f}%")
+c4.metric("USDGEL(환율) 상승 확률", f"{gel_prob*100:.1f}%", delta=f"검증 정확도 {gel_acc*100:.1f}%")
 
 st.markdown("---")
 
-# 매크로 지표 독립 다중 Y축 그래프 시각화
+# 매크로 지표 독립 다중 Y축 그래프 시각화 (영문 라벨 적용으로 깨짐 방지)
 st.subheader("📊 주요 매크로 지표 추이 (독립 Y축 그래프)")
 
 fig, ax1 = plt.subplots(figsize=(12, 5))
 
 # 축 1: TNX (금리)
 color1 = '#1f77b4'
-ax1.set_xlabel('날짜')
-ax1.set_ylabel('미 10년물 국채금리 (%)', color=color1)
+ax1.set_xlabel('Date')
+ax1.set_ylabel('US 10Y Treasury (%)', color=color1)
 ax1.plot(df.index[-120:], df['TNX'].iloc[-120:], color=color1, label='TNX (%)', linewidth=2)
 ax1.tick_params(axis='y', labelcolor=color1)
 
 # 축 2: VIX (변동성)
 ax2 = ax1.twinx()
 color2 = '#ff7f0e'
-ax2.set_ylabel('변동성지수 (VIX)', color=color2)
+ax2.set_ylabel('VIX Index', color=color2)
 ax2.plot(df.index[-120:], df['VIX'].iloc[-120:], color=color2, label='VIX', linewidth=1.5, linestyle='--')
 ax2.tick_params(axis='y', labelcolor=color2)
 
@@ -138,11 +134,11 @@ ax2.tick_params(axis='y', labelcolor=color2)
 ax3 = ax1.twinx()
 ax3.spines["right"].set_position(("axes", 1.12))
 color3 = '#2ca02c'
-ax3.set_ylabel('WTI 원유 ($/bbl)', color=color3)
+ax3.set_ylabel('WTI Oil ($/bbl)', color=color3)
 ax3.plot(df.index[-120:], df['Oil'].iloc[-120:], color=color3, label='WTI Oil ($)', linewidth=1.5, linestyle=':')
 ax3.tick_params(axis='y', labelcolor=color3)
 
-plt.title("최근 6개월 주요 매크로 변수 동향", fontsize=13, pad=10)
+plt.title("Recent 6-Month Macro Trends", fontsize=13, pad=10)
 fig.tight_layout()
 
 st.pyplot(fig)
