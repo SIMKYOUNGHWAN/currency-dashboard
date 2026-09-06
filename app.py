@@ -17,24 +17,42 @@ st.set_page_config(
 st.title("🌐 거시경제 지표 기반 환율 예측 대시보드")
 st.caption("미국 달러 대 원화(USDKRW) 및 라리화(USDGEL) 4주 추세 분석 모델")
 
-# 2. 금융 데이터 로드
+# 2. 금융 데이터 로드 (개별 수집 및 선형 보간으로 GEL 일직선 오류 수정)
 @st.cache_data(ttl=3600)
 def load_market_data():
     ticker_map = {
         'USDKRW': 'KRW=X',
-        'USDGEL': 'GEL=X',
-        'TNX': '^TNX',     # 미 10년물 국채 금리
-        'VIX': '^VIX',     # 변동성 지수
-        'Oil': 'CL=F',      # WTI 원유 선물
-        'SPX': '^GSPC'     # S&P 500 지수
+        'USDGEL': 'USDGEL=X', # 티커 보완
+        'TNX': '^TNX',        # 미 10년물 국채 금리
+        'VIX': '^VIX',        # 변동성 지수
+        'Oil': 'CL=F',         # WTI 원유 선물
+        'SPX': '^GSPC'        # S&P 500 지수
     }
     
-    symbols = list(ticker_map.values())
-    raw_data = yf.download(symbols, period="3y", progress=False)['Close']
+    df = pd.DataFrame()
     
-    inv_map = {v: k for k, v in ticker_map.items()}
-    df = raw_data.rename(columns=inv_map)
-    df = df.ffill().bfill()
+    for name, symbol in ticker_map.items():
+        try:
+            ticker = yf.Ticker(symbol)
+            hist = ticker.history(period="3y")['Close']
+            if not hist.empty:
+                # 시간대(timezone) 정보 제거하여 날짜 인덱스 통일
+                hist.index = hist.index.tz_localize(None)
+                df[name] = hist
+        except Exception:
+            pass
+            
+    # GEL 데이터 수집 실패 시 대체 티커 시도
+    if 'USDGEL' not in df.columns or df['USDGEL'].isnull().all():
+        try:
+            hist_gel = yf.Ticker('GEL=X').history(period="3y")['Close']
+            hist_gel.index = hist_gel.index.tz_localize(None)
+            df['USDGEL'] = hist_gel
+        except Exception:
+            pass
+
+    # 선형 보간(interpolate) 적용 후 남은 양끝 결측치만 ffill/bfill
+    df = df.interpolate(method='linear', limit_direction='both').ffill().bfill()
     return df
 
 # 3. AI 모델 학습 및 예측 함수
@@ -123,7 +141,6 @@ with col_fx1:
     ax_krw.set_title("USDKRW (KRW/USD)", fontsize=11, pad=8)
     ax_krw.grid(True, linestyle='--', alpha=0.5)
     
-    # Y축 여백 자동 맞춤 (최솟값 -2%, 최댓값 +2%)
     krw_min, krw_max = recent_df['USDKRW'].min(), recent_df['USDKRW'].max()
     ax_krw.set_ylim(krw_min * 0.98, krw_max * 1.02)
     fig_krw.autofmt_xdate(rotation=30)
@@ -136,10 +153,9 @@ with col_fx2:
     ax_gel.set_title("USDGEL (GEL/USD)", fontsize=11, pad=8)
     ax_gel.grid(True, linestyle='--', alpha=0.5)
     
-    # Y축 여백 자동 맞춤 (GEL 미세 변동 확대)
     gel_min, gel_max = recent_df['USDGEL'].min(), recent_df['USDGEL'].max()
     if gel_min == gel_max:
-        ax_gel.set_ylim(gel_min * 0.95, gel_max * 1.05)
+        ax_gel.set_ylim(gel_min * 0.98, gel_max * 1.02)
     else:
         ax_gel.set_ylim(gel_min * 0.995, gel_max * 1.005)
         
