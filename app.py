@@ -4,9 +4,15 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import requests
+import urllib3
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import accuracy_score
+
+# NBG API SSL 경고 비활성화
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # 1. 웹 페이지 기본 레이아웃 설정
 st.set_page_config(
@@ -16,46 +22,76 @@ st.set_page_config(
 )
 
 st.title("🌐 거시경제 지표 기반 환율 예측 대시보드")
-st.caption("미국 달러 대 원화(USDKRW) 및 라리화(USDGEL) 4주 추세 분석 모델")
+st.caption("미국 달러 대 원화(USDKRW) 및 조지아 라리화(USDGEL - NBG 공식 연동) 4주 추세 분석 모델")
 
 # 데이터 캐시 비우기 버튼
 if st.sidebar.button("🔄 데이터 캐시 강제 리셋"):
     st.cache_data.clear()
     st.rerun()
 
-# 2. 라리화(USDGEL) 타겟 인덱스 맞춤형 수집 함수 (NaN 방지)
-def fetch_usdgel_series(target_index):
-    # 1차: 야후 파이낸스 개별 티커 시도
-    for symbol in ['USDGEL=X', 'GEL=X']:
-        try:
-            raw = yf.download(symbol, period="3y", progress=False)['Close']
-            if isinstance(raw, pd.DataFrame):
-                raw = raw.iloc[:, 0]
-            s = raw.dropna()
-            if len(s) > 50 and s.std() > 0.001:
-                s.index = pd.to_datetime(s.index).tz_localize(None)
-                s_reindexed = s.reindex(target_index, method='nearest')
-                if s_reindexed.notnull().sum() > 10:
-                    return s_reindexed
-        except Exception:
-            pass
+# 2. 조지아 중앙은행(NBG) 단일 날짜 환율 수집 함수
+def fetch_nbg_single_date(dt):
+    date_str = dt.strftime("%Y-%m-%d")
+    url = f"https://nbg.gov.ge/gw/api/ct/monetarypolicy/currencies/en/json/?date={date_str}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    
+    try:
+        res = requests.get(url, headers=headers, timeout=5, verify=False)
+        if res.status_code == 200:
+            data = res.json()
+            if data and len(data) > 0:
+                for curr in data[0].get("currencies", []):
+                    if curr.get("code") == "USD":
+                        return dt, float(curr["rate"])
+    except Exception:
+        pass
+    return dt, None
 
-    # 2차: 실시간 기준 환율 API 수집
-    base_rate = 2.65
+# 3. NBG 데이터를 병렬 수집하여 타겟 시계열 인덱스에 맞추는 함수
+def fetch_usdgel_series(target_index):
+    if len(target_index) == 0:
+        return pd.Series(dtype=float)
+        
+    start_date = target_index.min()
+    end_date = target_index.max()
+    
+    # 3일 간격 샘플링으로 빠른 병렬 데이터 수집
+    sample_dates = pd.date_range(start=start_date, end=end_date, freq="3D")
+    
+    records = {}
+    with ThreadPoolExecutor(max_workers=15) as executor:
+        results = executor.map(fetch_nbg_single_date, sample_dates)
+        for dt, rate in results:
+            if rate is not None:
+                records[dt] = rate
+
+    if records:
+        s = pd.Series(records).sort_index()
+        s.index = pd.to_datetime(s.index).tz_localize(None)
+        
+        # 타겟 인덱스 기준으로 시계열 보간(Interpolation) 및 정렬
+        full_idx = s.index.union(target_index)
+        s_interpolated = (
+            s.reindex(full_idx)
+            .interpolate(method="time")
+            .reindex(target_index)
+            .ffill()
+            .bfill()
+        )
+        return s_interpolated
+
+    # 비상 예외 시 실시간 기준 환율 API 활용
     try:
         url = "https://open.er-api.com/v6/latest/USD"
         res = requests.get(url, timeout=5).json()
-        base_rate = res.get("rates", {}).get("GEL", 2.65)
+        base_rate = res.get("rates", {}).get("GEL", 2.70)
     except Exception:
-        pass
+        base_rate = 2.70
+    return pd.Series(base_rate, index=target_index)
 
-    # 3차: 타겟 인덱스 규격에 맞춘 변동 시계열 생성
-    np.random.seed(42)
-    returns = np.random.normal(0, 0.002, size=len(target_index))
-    price_path = base_rate * np.exp(np.cumsum(returns))
-    return pd.Series(price_path, index=target_index, name='USDGEL')
-
-# 3. 전체 마켓 데이터 로드
+# 4. 전체 마켓 데이터 로드
 @st.cache_data(ttl=600)
 def load_market_data():
     ticker_map = {
@@ -73,14 +109,14 @@ def load_market_data():
     df = raw_data.rename(columns=inv_map)
     df.index = pd.to_datetime(df.index).tz_localize(None)
     
-    # GEL 데이터 결합
+    # 조지아 중앙은행(NBG) 실제 라리화 환율 시계열 결합
     df['USDGEL'] = fetch_usdgel_series(df.index)
     
-    # 결측치 보완
+    # 결측치 최종 보완
     df = df.interpolate(method='time', limit_direction='both').ffill().bfill()
     return df
 
-# 4. AI 모델 학습 및 예측 함수
+# 5. AI 모델 학습 및 예측 함수
 def train_and_predict(data, target_symbol):
     df = data.copy()
     
@@ -131,8 +167,8 @@ def train_and_predict(data, target_symbol):
     
     return prob_up, accuracy, feature_imp
 
-# 5. 화면 출력 부분
-with st.spinner("최신 마켓 데이터 수집 및 예측 모델 실행 중..."):
+# 6. 화면 출력
+with st.spinner("조지아 중앙은행(NBG) 및 글로벌 마켓 데이터 수집 중..."):
     df = load_market_data()
     krw_prob, krw_acc, krw_imp = train_and_predict(df, 'USDKRW')
     gel_prob, gel_acc, gel_imp = train_and_predict(df, 'USDGEL')
@@ -147,7 +183,7 @@ curr_gel = df['USDGEL'].iloc[-1]
 c1.metric("현재 USDKRW", f"{curr_krw:,.2f} 원")
 c2.metric("USDKRW(환율) 상승 확률", f"{krw_prob*100:.1f}%", delta=f"검증 정확도 {krw_acc*100:.1f}%")
 
-c3.metric("현재 USDGEL", f"{curr_gel:,.4f} GEL")
+c3.metric("현재 USDGEL (NBG)", f"{curr_gel:,.4f} GEL")
 c4.metric("USDGEL(환율) 상승 확률", f"{gel_prob*100:.1f}%", delta=f"검증 정확도 {gel_acc*100:.1f}%")
 
 st.markdown("---")
@@ -175,7 +211,7 @@ with col_fx1:
 with col_fx2:
     fig_gel, ax_gel = plt.subplots(figsize=(6, 3))
     ax_gel.plot(recent_df.index, recent_df['USDGEL'], color='#ff7f0e', linewidth=1.8)
-    ax_gel.set_title("USDGEL (GEL/USD)", fontsize=11, pad=8)
+    ax_gel.set_title("USDGEL (National Bank of Georgia)", fontsize=11, pad=8)
     ax_gel.grid(True, linestyle='--', alpha=0.5)
     
     valid_gel = recent_df['USDGEL'].dropna()
@@ -192,7 +228,7 @@ with col_fx2:
 
 st.markdown("---")
 
-# 주요 매크로 지표 추이 및 그래프 색상 범례 안내
+# 주요 매크로 지표 추이
 st.subheader("📊 주요 매크로 지표 추이 (독립 Y축 그래프)")
 st.caption("🟦 **파란색 (좌측 Y축)**: 미 10년물 국채 금리 (TNX) | 🟧 **주황색 점선 (우측1 Y축)**: VIX 변동성 지수 | 🟩 **초록색 점선 (우측2 Y축)**: WTI 원유 가격 ($)")
 
@@ -217,7 +253,6 @@ ax3.set_ylabel('WTI Oil ($/bbl)', color=color3)
 line3 = ax3.plot(recent_df.index, recent_df['Oil'], color=color3, label='WTI Oil ($)', linewidth=1.5, linestyle=':')
 ax3.tick_params(axis='y', labelcolor=color3)
 
-# 영문 범례(Legend) 적용으로 깨짐 현상 완전 방지
 lines = line1 + line2 + line3
 labels = [l.get_label() for l in lines]
 ax1.legend(lines, labels, loc='upper left', frameon=True, facecolor='white', framealpha=0.9)
@@ -239,4 +274,4 @@ with col_b:
     st.write("**USDGEL 영향 변수**")
     st.bar_chart(gel_imp)
 
-st.caption("데이터 출처: Yahoo Finance & Open ER API | 매시간 자동으로 최신 시장 데이터를 수집하여 업데이트합니다.")
+st.caption("데이터 출처: Yahoo Finance & National Bank of Georgia (NBG) | 매시간 자동으로 최신 시장 데이터를 수집하여 업데이트합니다.")
