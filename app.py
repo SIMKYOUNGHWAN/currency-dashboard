@@ -1,6 +1,6 @@
 import streamlit as st
 import matplotlib
-matplotlib.use('Agg')  # Streamlit Cloud 서버 튕김 방지 (최상단 배치 필수)
+matplotlib.use('Agg')  # Streamlit Cloud 서버 튕김 방지 (최상단 필수 배치)
 import matplotlib.pyplot as plt
 
 import yfinance as yf
@@ -18,25 +18,14 @@ from sklearn.metrics import accuracy_score
 # NBG API SSL 경고 비활성화
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# 1. 웹 페이지 기본 레이아웃 설정 (Streamlit 명령 중 최상단 필수 위치)
+# 1. 웹 페이지 기본 레이아웃 설정
 st.set_page_config(
     page_title="거시경제 환율 예측 대시보드",
     page_icon="📈",
     layout="wide"
 )
 
-# 2. Matplotlib OS별 한글 폰트 설정 (폰트 깨짐 방지)
-system_name = platform.system()
-if system_name == 'Windows':
-    plt.rc('font', family='Malgun Gothic')
-elif system_name == 'Darwin':  # Mac
-    plt.rc('font', family='AppleGothic')
-else:  # Linux / Streamlit Cloud
-    plt.rc('font', family='NanumGothic')
-
-plt.rc('axes', unicode_minus=False)  # 마이너스 기호 깨짐 방지
-
-# 3. Streamlit 상단 툴바 및 헤더 숨김 CSS
+# 2. Streamlit 상단 툴바 및 헤더 숨김 CSS
 st.markdown("""
     <style>
     [data-testid="stToolbar"] {
@@ -57,39 +46,34 @@ st.caption("미국 달러 대 원화(USDKRW) 및 조지아 라리화(USDGEL - NB
 if st.sidebar.button("🔄 데이터 캐시 강제 리셋"):
     st.cache_data.clear()
     st.rerun()
-# 4) 기술적 보조지표 (RSI & 연율화 변동성) - 폰트 깨짐 완벽 해결 버전
-st.subheader("📉 기술적 보조지표 분석 (RSI & 연율화 변동성)")
-col_rsi, col_vol = st.columns(2)
 
-recent_df['KRW_RSI'] = calculate_rsi(recent_df['USDKRW'], 14)
-recent_df['GEL_RSI'] = calculate_rsi(recent_df['USDGEL'], 14)
+# 3. 보조지표 계산 함수 (RSI) - 상단에 정의
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/period, adjust=False).mean()
+    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/period, adjust=False).mean()
+    rs = gain / (loss + 1e-9)
+    return 100 - (100 / (1 + rs))
 
-recent_df['KRW_Vol'] = recent_df['USDKRW'].pct_change().rolling(20).std() * np.sqrt(252) * 100
-recent_df['GEL_Vol'] = recent_df['USDGEL'].pct_change().rolling(20).std() * np.sqrt(252) * 100
-
-with col_rsi:
-    fig_rsi, ax_rsi = plt.subplots(figsize=(6, 3))
-    ax_rsi.plot(recent_df.index, recent_df['KRW_RSI'], color='black', label='KRW RSI(14)')
-    ax_rsi.plot(recent_df.index, recent_df['GEL_RSI'], color='navy', label='GEL RSI(14)')
-    ax_rsi.axhline(70, color='red', linestyle='--', alpha=0.6, label='Overbought (70)')
-    ax_rsi.axhline(30, color='blue', linestyle='--', alpha=0.6, label='Oversold (30)')
-    ax_rsi.set_title("RSI (Overbought / Oversold)", fontsize=11, pad=8)
-    ax_rsi.grid(True, linestyle='--', alpha=0.3)
-    ax_rsi.legend(loc='upper left', fontsize=8)
-    fig_rsi.autofmt_xdate(rotation=30)
-    fig_rsi.tight_layout()
-    st.pyplot(fig_rsi)
-
-with col_vol:
-    fig_vol, ax_vol = plt.subplots(figsize=(6, 3))
-    ax_vol.plot(recent_df.index, recent_df['KRW_Vol'], color='teal', label='KRW Volatility')
-    ax_vol.plot(recent_df.index, recent_df['GEL_Vol'], color='darkslateblue', label='GEL Volatility')
-    ax_vol.set_title("20-Day Annualized Volatility (%)", fontsize=11, pad=8)
-    ax_vol.grid(True, linestyle='--', alpha=0.3)
-    ax_vol.legend(loc='upper left', fontsize=8)
-    fig_vol.autofmt_xdate(rotation=30)
-    fig_vol.tight_layout()
-    st.pyplot(fig_vol)
+# 4. 조지아 중앙은행(NBG) 단일 날짜 환율 수집 함수
+def fetch_nbg_single_date(dt):
+    date_str = dt.strftime("%Y-%m-%d")
+    url = f"https://nbg.gov.ge/gw/api/ct/monetarypolicy/currencies/en/json/?date={date_str}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    
+    try:
+        res = requests.get(url, headers=headers, timeout=5, verify=False)
+        if res.status_code == 200:
+            data = res.json()
+            if data and len(data) > 0:
+                for curr in data[0].get("currencies", []):
+                    if curr.get("code") == "USD":
+                        return dt, float(curr["rate"])
+    except Exception:
+        pass
+    return dt, None
 
 # 5. NBG 데이터를 병렬 수집하여 타겟 시계열 인덱스에 맞추는 함수
 def fetch_usdgel_series(target_index):
@@ -130,15 +114,7 @@ def fetch_usdgel_series(target_index):
         base_rate = 2.70
     return pd.Series(base_rate, index=target_index)
 
-# 6. 보조지표 계산 함수 (RSI)
-def calculate_rsi(series, period=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/period, adjust=False).mean()
-    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/period, adjust=False).mean()
-    rs = gain / (loss + 1e-9)
-    return 100 - (100 / (1 + rs))
-
-# 7. 전체 마켓 데이터 로드
+# 6. 전체 마켓 데이터 로드
 @st.cache_data(ttl=600)
 def load_market_data():
     ticker_map = {
@@ -161,7 +137,7 @@ def load_market_data():
     df = df.interpolate(method='time', limit_direction='both').ffill().bfill()
     return df
 
-# 8. AI 모델 학습 및 예측 함수
+# 7. AI 모델 학습 및 예측 함수
 def train_and_predict(data, target_symbol):
     df = data.copy()
     
@@ -213,7 +189,7 @@ def train_and_predict(data, target_symbol):
     
     return prob_up, accuracy, feature_imp
 
-# 9. 화면 출력
+# 8. 메인 데이터 처리 및 리포트 화면 구현
 with st.spinner("조지아 중앙은행(NBG) 및 글로벌 마켓 데이터 수집 중..."):
     df = load_market_data()
     krw_prob, krw_acc, krw_imp = train_and_predict(df, 'USDKRW')
@@ -234,15 +210,16 @@ c4.metric("USDGEL(환율) 상승 확률", f"{gel_prob*100:.1f}%", delta=f"검증
 
 st.markdown("---")
 
-# 1) 타겟 환율 추이 그래프
-st.subheader("📈 타겟 환율 추이 및 이동평균선 (최근 6개월)")
-col_fx1, col_fx2 = st.columns(2)
-
+# 최근 120일 데이터 슬라이싱 및 이동평균 계산
 recent_df = df.iloc[-120:].copy()
 recent_df['KRW_MA20'] = recent_df['USDKRW'].rolling(20).mean()
 recent_df['KRW_MA60'] = recent_df['USDKRW'].rolling(60).mean()
 recent_df['GEL_MA20'] = recent_df['USDGEL'].rolling(20).mean()
 recent_df['GEL_MA60'] = recent_df['USDGEL'].rolling(60).mean()
+
+# 1) 타겟 환율 추이 그래프
+st.subheader("📈 타겟 환율 추이 및 이동평균선 (최근 6개월)")
+col_fx1, col_fx2 = st.columns(2)
 
 with col_fx1:
     fig_krw, ax_krw = plt.subplots(figsize=(6, 3))
@@ -334,7 +311,7 @@ st.pyplot(fig_dxy)
 
 st.markdown("---")
 
-# 4) 기술적 보조지표 (RSI & 변동성) - 한글 제목 적용 및 날짜 간격 정돈
+# 4) 기술적 보조지표 (RSI & 연율화 변동성)
 st.subheader("📉 기술적 보조지표 분석 (RSI & 연율화 변동성)")
 col_rsi, col_vol = st.columns(2)
 
@@ -348,9 +325,9 @@ with col_rsi:
     fig_rsi, ax_rsi = plt.subplots(figsize=(6, 3))
     ax_rsi.plot(recent_df.index, recent_df['KRW_RSI'], color='black', label='KRW RSI(14)')
     ax_rsi.plot(recent_df.index, recent_df['GEL_RSI'], color='navy', label='GEL RSI(14)')
-    ax_rsi.axhline(70, color='red', linestyle='--', alpha=0.6, label='과매수 (70)')
-    ax_rsi.axhline(30, color='blue', linestyle='--', alpha=0.6, label='과매도 (30)')
-    ax_rsi.set_title("RSI 과매수 / 과매도 지표", fontsize=11, pad=8)
+    ax_rsi.axhline(70, color='red', linestyle='--', alpha=0.6, label='Overbought (70)')
+    ax_rsi.axhline(30, color='blue', linestyle='--', alpha=0.6, label='Oversold (30)')
+    ax_rsi.set_title("RSI (Overbought / Oversold)", fontsize=11, pad=8)
     ax_rsi.grid(True, linestyle='--', alpha=0.3)
     ax_rsi.legend(loc='upper left', fontsize=8)
     fig_rsi.autofmt_xdate(rotation=30)
@@ -359,9 +336,9 @@ with col_rsi:
 
 with col_vol:
     fig_vol, ax_vol = plt.subplots(figsize=(6, 3))
-    ax_vol.plot(recent_df.index, recent_df['KRW_Vol'], color='teal', label='KRW 변동성')
-    ax_vol.plot(recent_df.index, recent_df['GEL_Vol'], color='darkslateblue', label='GEL 변동성')
-    ax_vol.set_title("20일 이동 연율화 변동성 (%)", fontsize=11, pad=8)
+    ax_vol.plot(recent_df.index, recent_df['KRW_Vol'], color='teal', label='KRW Volatility')
+    ax_vol.plot(recent_df.index, recent_df['GEL_Vol'], color='darkslateblue', label='GEL Volatility')
+    ax_vol.set_title("20-Day Annualized Volatility (%)", fontsize=11, pad=8)
     ax_vol.grid(True, linestyle='--', alpha=0.3)
     ax_vol.legend(loc='upper left', fontsize=8)
     fig_vol.autofmt_xdate(rotation=30)
