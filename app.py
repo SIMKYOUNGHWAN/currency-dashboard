@@ -1,6 +1,6 @@
 import streamlit as st
 import matplotlib
-matplotlib.use('Agg')  # Streamlit Cloud 서버 튕김 방지 (최상단 필수 배치)
+matplotlib.use('Agg')  # Streamlit Cloud 서버 튕김 방지 (최상단 배치)
 import matplotlib.pyplot as plt
 
 import yfinance as yf
@@ -118,7 +118,7 @@ def fetch_usdgel_series(target_index):
         base_rate = 2.70
     return pd.Series(base_rate, index=target_index)
 
-# 6. 마켓 데이터 수집 (위안화 USDCNY 포함)
+# 6. 마켓 데이터 수집 (위안화 USDCNY 추가)
 @st.cache_data(ttl=600)
 def load_market_data():
     ticker_map = {
@@ -129,7 +129,7 @@ def load_market_data():
         'SPX': '^GSPC',    # S&P 500 지수
         'DXY': 'DX-Y.NYB', # 달러 인덱스
         'SOX': '^SOX',     # 필라델피아 반도체 지수
-        'USDCNY': 'CNY=X'  # 중국 위안화
+        'USDCNY': 'CNY=X'  # 중국 위안화 (원화 커플링 대리 지표)
     }
     symbols = list(ticker_map.values())
     raw_data = yf.download(symbols, period="3y", progress=False)['Close']
@@ -182,7 +182,7 @@ def train_and_predict(data, target_symbol, horizon_days, oil_s=0.0, tnx_s=0.0, d
     n_splits = min(4, max(2, n_samples // 40))
     tscv = TimeSeriesSplit(n_splits=n_splits)
     
-    # 과적합 방지 모델 규제
+    # 과적합 방지 규제
     model = RandomForestClassifier(
         n_estimators=150, 
         max_depth=3, 
@@ -287,30 +287,28 @@ with col_fx2:
 
 st.markdown("---")
 
-# 2) 무역 여건 & 위안화 동향 그래프 (시작일=100 기준 정규화)
+# 2) 무역 여건 & 위안화 동향 그래프 (최근 3년)
 st.subheader("🚢 한국 무역 여건(Trade Proxy) 및 위안화(USDCNY) 커플링")
-st.caption("💡 단위가 서로 다른 3개 지표의 상대 변동률을 왜곡 없이 비교하기 위해 **시작일 기준(=100)**으로 정규화한 차트입니다.")
+st.caption("⬛ **검은색 (좌측 Y축)**: USDKRW | 🟦 **파란색 점선 (우측 Y축)**: 무역 여건 지수 (SOX/Oil) | 🔴 **빨간색 점선 (우측 Y축)**: USDCNY 환율")
 
-# 3개 지표 시작일(100) 기준 정규화 지수 생성
-df_norm = pd.DataFrame(index=df.index)
-df_norm['USDKRW'] = (df['USDKRW'] / df['USDKRW'].iloc[0]) * 100
-df_norm['Trade_Proxy'] = (df['Trade_Proxy'] / df['Trade_Proxy'].iloc[0]) * 100
-df_norm['USDCNY'] = (df['USDCNY'] / df['USDCNY'].iloc[0]) * 100
+fig_trade, ax_krw_t = plt.subplots(figsize=(12, 4))
+ax_trade = ax_krw_t.twinx()
 
-fig_trade, ax_t = plt.subplots(figsize=(12, 4))
+line_krw = ax_krw_t.plot(df.index, df['USDKRW'], color='black', label='USDKRW Exchange Rate', linewidth=1.5)
+line_trade = ax_trade.plot(df.index, df['Trade_Proxy'], color='dodgerblue', linestyle='--', label='Trade Proxy (SOX/Oil)', linewidth=1.3)
+line_cny = ax_trade.plot(df.index, df['USDCNY'], color='crimson', linestyle=':', label='USDCNY Exchange Rate', linewidth=1.3)
 
-ax_t.plot(df_norm.index, df_norm['USDKRW'], color='black', label='USDKRW (원/달러)', linewidth=1.5)
-ax_t.plot(df_norm.index, df_norm['Trade_Proxy'], color='dodgerblue', linestyle='--', label='Trade Proxy (무역여건: SOX/Oil)', linewidth=1.3)
-ax_t.plot(df_norm.index, df_norm['USDCNY'], color='crimson', linestyle='-', label='USDCNY (위안화)', linewidth=1.4)
+ax_krw_t.set_ylabel('USDKRW Rate', color='black')
+ax_trade.set_ylabel('Trade Proxy / USDCNY', color='dodgerblue')
 
-ax_t.set_ylabel('상대 변동 지수 (시작일 = 100)', fontsize=10)
-ax_t.grid(True, linestyle='--', alpha=0.3)
-ax_t.legend(loc='upper left', frameon=True, facecolor='white', framealpha=0.9, fontsize=9)
-plt.title("Normalized Trend Comparison (USDKRW vs Trade Proxy vs USDCNY)", fontsize=12, pad=10)
+lines_t = line_krw + line_trade + line_cny
+labels_t = [l.get_label() for l in lines_t]
+ax_krw_t.legend(lines_t, labels_t, loc='upper left', frameon=True, facecolor='white', framealpha=0.9)
+ax_krw_t.grid(True, linestyle='--', alpha=0.3)
+plt.title("Trade Proxy & USDCNY Coupling vs USDKRW", fontsize=12, pad=10)
 fig_trade.tight_layout()
 
 st.pyplot(fig_trade)
-st.info("💡 **차트 해석**: 정규화(Base=100)를 거치면서 원/달러(검은선)와 위안화(빨간선)의 동조화(커플링) 현상 및 무역 여건(파란 점선)과의 역상관 관계를 왜곡 없이 한눈에 비교할 수 있습니다.")
 
 st.markdown("---")
 
