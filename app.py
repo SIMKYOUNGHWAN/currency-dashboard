@@ -18,14 +18,13 @@ st.set_page_config(
 st.title("🌐 거시경제 지표 기반 환율 예측 대시보드")
 st.caption("미국 달러 대 원화(USDKRW) 및 라리화(USDGEL) 4주 추세 분석 모델")
 
-# 캐시 이슈 방지를 위한 캐시 비우기 버튼 (필요시 사용)
+# 데이터 캐시 비우기 버튼
 if st.sidebar.button("🔄 데이터 캐시 강제 리셋"):
     st.cache_data.clear()
     st.rerun()
 
 # 2. 라리화(USDGEL) 전용 고신뢰도 수집 함수
 def fetch_usdgel_series():
-    # 1차: Fawaz Ahmed Open Currency API (GEL 일별 시계열 지원)
     try:
         url = "https://open.er-api.com/v6/latest/USD"
         res = requests.get(url, timeout=5).json()
@@ -33,7 +32,6 @@ def fetch_usdgel_series():
     except Exception:
         base_rate = 2.65
 
-    # 2차: 야후 파이낸스 개별 티커 수집
     try:
         df_gel = yf.Ticker("GEL=X").history(period="3y")['Close']
         if len(df_gel) > 50 and df_gel.std() > 0.001:
@@ -42,7 +40,6 @@ def fetch_usdgel_series():
     except Exception:
         pass
 
-    # 3차: 데이터 부재/동결 시 달러 인덱스 및 매크로 변동 기반 추세 복원 (보정)
     dates = pd.date_range(end=pd.Timestamp.now(), periods=750, freq='B')
     np.random.seed(42)
     returns = np.random.normal(0, 0.003, size=len(dates))
@@ -50,7 +47,7 @@ def fetch_usdgel_series():
     return pd.Series(price_path, index=dates, name='USDGEL')
 
 # 3. 전체 마켓 데이터 로드
-@st.cache_data(ttl=600) # 캐시 주기를 10분으로 단축
+@st.cache_data(ttl=600)
 def load_market_data():
     ticker_map = {
         'USDKRW': 'KRW=X',
@@ -67,11 +64,11 @@ def load_market_data():
     df = raw_data.rename(columns=inv_map)
     df.index = pd.to_datetime(df.index).tz_localize(None)
     
-    # GEL 데이터 결합 및 보완
+    # GEL 데이터 결합
     gel_series = fetch_usdgel_series()
     df['USDGEL'] = gel_series
     
-    # 선형 보간 처리
+    # 결측치 보완 (선형 보간 및 앞뒤 채우기)
     df = df.interpolate(method='time', limit_direction='both').ffill().bfill()
     return df
 
@@ -79,13 +76,11 @@ def load_market_data():
 def train_and_predict(data, target_symbol):
     df = data.copy()
     
-    # 매크로 파생 변수 생성
     df['TNX_Ret_4W'] = df['TNX'].pct_change(20)
     df['VIX_Level'] = df['VIX']
     df['Oil_Ret_4W'] = df['Oil'].pct_change(20)
     df['SPX_Ret_4W'] = df['SPX'].pct_change(20)
     
-    # 타겟 설정: 4주(20영업일) 후 상승 여부 (1: 상승, 0: 하락/보합)
     df['Target'] = (df[target_symbol].shift(-20) > df[target_symbol]).astype(int)
     
     features = ['TNX_Ret_4W', 'VIX_Level', 'Oil_Ret_4W', 'SPX_Ret_4W']
@@ -161,8 +156,12 @@ with col_fx1:
     ax_krw.set_title("USDKRW (KRW/USD)", fontsize=11, pad=8)
     ax_krw.grid(True, linestyle='--', alpha=0.5)
     
-    krw_min, krw_max = recent_df['USDKRW'].min(), recent_df['USDKRW'].max()
-    ax_krw.set_ylim(krw_min * 0.98, krw_max * 1.02)
+    valid_krw = recent_df['USDKRW'].dropna()
+    if not valid_krw.empty:
+        krw_min, krw_max = valid_krw.min(), valid_krw.max()
+        if not np.isnan(krw_min) and not np.isnan(krw_max):
+            ax_krw.set_ylim(krw_min * 0.98, krw_max * 1.02)
+            
     fig_krw.autofmt_xdate(rotation=30)
     fig_krw.tight_layout()
     st.pyplot(fig_krw)
@@ -173,12 +172,16 @@ with col_fx2:
     ax_gel.set_title("USDGEL (GEL/USD)", fontsize=11, pad=8)
     ax_gel.grid(True, linestyle='--', alpha=0.5)
     
-    gel_min, gel_max = recent_df['USDGEL'].min(), recent_df['USDGEL'].max()
-    if gel_min == gel_max:
-        ax_gel.set_ylim(gel_min * 0.98, gel_max * 1.02)
-    else:
-        ax_gel.set_ylim(gel_min * 0.995, gel_max * 1.005)
-        
+    # NaN 방지 예외 처리 적용
+    valid_gel = recent_df['USDGEL'].dropna()
+    if not valid_gel.empty:
+        gel_min, gel_max = valid_gel.min(), valid_gel.max()
+        if not np.isnan(gel_min) and not np.isnan(gel_max):
+            if gel_min == gel_max:
+                ax_gel.set_ylim(gel_min * 0.98, gel_max * 1.02)
+            else:
+                ax_gel.set_ylim(gel_min * 0.995, gel_max * 1.005)
+                
     fig_gel.autofmt_xdate(rotation=30)
     fig_gel.tight_layout()
     st.pyplot(fig_gel)
