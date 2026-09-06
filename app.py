@@ -49,7 +49,7 @@ def fetch_usdgel_series(target_index):
     except Exception:
         pass
 
-    # 3차: 타겟 인덱스 규격에 맞춘 변동 시계열 생성 (NaN 결합 오류 완벽 차단)
+    # 3차: 타겟 인덱스 규격에 맞춘 변동 시계열 생성
     np.random.seed(42)
     returns = np.random.normal(0, 0.002, size=len(target_index))
     price_path = base_rate * np.exp(np.cumsum(returns))
@@ -73,10 +73,10 @@ def load_market_data():
     df = raw_data.rename(columns=inv_map)
     df.index = pd.to_datetime(df.index).tz_localize(None)
     
-    # GEL 데이터를 기존 날짜 인덱스와 정확히 맞춰 결합
+    # GEL 데이터 결합
     df['USDGEL'] = fetch_usdgel_series(df.index)
     
-    # 결측치 최종 보완
+    # 결측치 보완
     df = df.interpolate(method='time', limit_direction='both').ffill().bfill()
     return df
 
@@ -201,23 +201,23 @@ fig, ax1 = plt.subplots(figsize=(12, 4.5))
 color1 = '#1f77b4'
 ax1.set_xlabel('Date')
 ax1.set_ylabel('US 10Y Treasury (%)', color=color1)
-line1 = ax1.plot(recent_df.index, recent_df['TNX'], color=color1, label='미 10년물 국채 금리 (TNX)', linewidth=2)
+line1 = ax1.plot(recent_df.index, recent_df['TNX'], color=color1, label='US 10Y Yield (TNX)', linewidth=2)
 ax1.tick_params(axis='y', labelcolor=color1)
 
 ax2 = ax1.twinx()
 color2 = '#ff7f0e'
 ax2.set_ylabel('VIX Index', color=color2)
-line2 = ax2.plot(recent_df.index, recent_df['VIX'], color=color2, label='VIX 변동성 지수', linewidth=1.5, linestyle='--')
+line2 = ax2.plot(recent_df.index, recent_df['VIX'], color=color2, label='VIX Index', linewidth=1.5, linestyle='--')
 ax2.tick_params(axis='y', labelcolor=color2)
 
 ax3 = ax1.twinx()
 ax3.spines["right"].set_position(("axes", 1.12))
 color3 = '#2ca02c'
 ax3.set_ylabel('WTI Oil ($/bbl)', color=color3)
-line3 = ax3.plot(recent_df.index, recent_df['Oil'], color=color3, label='WTI 원유 선물 ($)', linewidth=1.5, linestyle=':')
+line3 = ax3.plot(recent_df.index, recent_df['Oil'], color=color3, label='WTI Oil ($)', linewidth=1.5, linestyle=':')
 ax3.tick_params(axis='y', labelcolor=color3)
 
-# 차트 내 통합 범례(Legend) 상단 배치
+# 영문 범례(Legend) 적용으로 깨짐 현상 완전 방지
 lines = line1 + line2 + line3
 labels = [l.get_label() for l in lines]
 ax1.legend(lines, labels, loc='upper left', frameon=True, facecolor='white', framealpha=0.9)
