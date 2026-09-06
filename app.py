@@ -138,33 +138,55 @@ def load_market_data():
     df = df.interpolate(method='time', limit_direction='both').ffill().bfill()
     return df
 
-# 7. AI 모델 학습 및 예측 함수
+# 7. AI 모델 학습 및 예측 함수 (기술적 지표 + 피처 강화 및 과적합 방지)
 def train_and_predict(data, target_symbol):
     df_temp = data.copy()
     
+    # Target 환율 자체의 기술적 지표 피처 생성
+    df_temp['Target_Ret_1W'] = df_temp[target_symbol].pct_change(5)
+    df_temp['Target_Ret_4W'] = df_temp[target_symbol].pct_change(20)
+    df_temp['Target_MA_Ratio'] = df_temp[target_symbol] / df_temp[target_symbol].rolling(20).mean()
+    df_temp['Target_RSI'] = calculate_rsi(df_temp[target_symbol], 14)
+    
+    # 매크로 및 무역 여건 지표
     df_temp['TNX_Ret_4W'] = df_temp['TNX'].pct_change(20)
     df_temp['VIX_Level'] = df_temp['VIX']
     df_temp['Oil_Ret_4W'] = df_temp['Oil'].pct_change(20)
     df_temp['SPX_Ret_4W'] = df_temp['SPX'].pct_change(20)
     df_temp['DXY_Ret_4W'] = df_temp['DXY'].pct_change(20)
+    df_temp['Trade_Proxy_Ret'] = (df_temp['SOX'] / df_temp['Oil']).pct_change(20)
     
+    # 4주(20영업일) 후 상승 여부 Target
     df_temp['Target'] = (df_temp[target_symbol].shift(-20) > df_temp[target_symbol]).astype(int)
     
-    features = ['TNX_Ret_4W', 'VIX_Level', 'Oil_Ret_4W', 'SPX_Ret_4W', 'DXY_Ret_4W']
+    features = [
+        'Target_Ret_1W', 'Target_Ret_4W', 'Target_MA_Ratio', 'Target_RSI',
+        'TNX_Ret_4W', 'VIX_Level', 'Oil_Ret_4W', 'SPX_Ret_4W', 'DXY_Ret_4W', 'Trade_Proxy_Ret'
+    ]
+    feature_labels = [
+        '1W Return', '4W Return', '20D MA Ratio', 'RSI Index',
+        '10Y Yield', 'VIX Index', 'WTI Oil', 'S&P 500', 'Dollar Index', 'Trade Proxy'
+    ]
+    
     df_model = df_temp[features + ['Target']].dropna()
     
     X = df_model[features]
     y = df_model['Target']
     
     n_samples = len(X)
-    feature_labels = ['10Y Yield', 'VIX Index', 'WTI Oil', 'S&P 500', 'Dollar Index']
-    
-    if n_samples < 10 or len(np.unique(y)) < 2:
-        return 0.5, 0.50, pd.Series([0.2]*5, index=feature_labels)
+    if n_samples < 20 or len(np.unique(y)) < 2:
+        return 0.5, 0.50, pd.Series([0.1]*10, index=feature_labels)
         
-    n_splits = min(3, max(2, n_samples // 30))
+    n_splits = min(4, max(2, n_samples // 40))
     tscv = TimeSeriesSplit(n_splits=n_splits)
-    model = RandomForestClassifier(n_estimators=100, random_state=42, max_depth=5)
+    
+    # 과적합을 막기 위해 max_depth를 3으로 제한 및 min_samples_leaf 설정
+    model = RandomForestClassifier(
+        n_estimators=150, 
+        max_depth=3, 
+        min_samples_leaf=5, 
+        random_state=42
+    )
     
     scores = []
     for train_idx, test_idx in tscv.split(X):
@@ -281,7 +303,7 @@ st.info("💡 **원리 해설**: 무역 여건 지수(파란 점선)가 상승�
 
 st.markdown("---")
 
-# 3) 주요 매크로 지표 추이 (최근 3년 전체 - 이미지와 동일)
+# 3) 주요 매크로 지표 추이 (최근 3년 전체)
 st.subheader("📊 주요 매크로 지표 추이 (최근 3년)")
 st.caption("🟦 **파란색 (좌측 Y축)**: 미 10년물 국채 금리 (TNX) | 🟧 **주황색 점선 (우측1 Y축)**: VIX 변동성 지수 | 🟩 **초록색 점선 (우측2 Y축)**: WTI 원유 가격 ($)")
 
@@ -317,7 +339,7 @@ st.pyplot(fig)
 
 st.markdown("---")
 
-# 4) 달러 인덱스 & 미국 증시 추이 (최근 3년 전체 - 이미지와 동일)
+# 4) 달러 인덱스 & 미국 증시 추이 (최근 3년 전체)
 st.subheader("💵 달러 인덱스 (DXY) 및 미국 증시 (S&P 500) 추이 (최근 3년)")
 st.caption("🟪 **보라색 (좌측 Y축)**: 달러 인덱스 (DXY) | 🌲 **진초록색 점선 (우측 Y축)**: S&P 500 지수")
 
