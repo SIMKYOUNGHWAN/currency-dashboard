@@ -1,8 +1,11 @@
 import streamlit as st
+import matplotlib
+matplotlib.use('Agg')  # Streamlit Cloud 서버 튕김 방지 (최상단 배치 필수)
+import matplotlib.pyplot as plt
+
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 import platform
 import requests
 import urllib3
