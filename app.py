@@ -263,15 +263,17 @@ c4.metric("USDGEL(환율) 상승 확률", f"{gel_prob*100:.1f}%", delta=f"검증
 
 st.markdown("---")
 
-# 최근 120일 데이터 슬라이싱 및 이동평균 계산
-recent_df = df.iloc[-120:].copy()
+# [수정] 최근 120거래일(~6개월)만 잘라서 보여주던 것을 코드1(main.py)처럼
+# 수집한 3년치 전체 데이터로 확장. yfinance/NBG 모두 period="3y"로 이미
+# 3년치를 받아오고 있었으므로, 여기서 슬라이싱만 없애면 된다.
+recent_df = df.copy()
 recent_df['KRW_MA20'] = recent_df['USDKRW'].rolling(20).mean()
 recent_df['KRW_MA60'] = recent_df['USDKRW'].rolling(60).mean()
 recent_df['GEL_MA20'] = recent_df['USDGEL'].rolling(20).mean()
 recent_df['GEL_MA60'] = recent_df['USDGEL'].rolling(60).mean()
 
 # 1) 타겟 환율 추이 그래프
-st.subheader("📈 타겟 환율 추이 및 이동평균선 (최근 6개월)")
+st.subheader("📈 타겟 환율 추이 및 이동평균선 (최근 3년)")
 col_fx1, col_fx2 = st.columns(2)
 
 with col_fx1:
