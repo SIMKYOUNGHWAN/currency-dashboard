@@ -1,277 +1,398 @@
-import streamlit as st
-import yfinance as yf
-import pandas as pd
-import numpy as np
+from concurrent.futures import ThreadPoolExecutor
+import os
+import platform
+import time
+from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 import requests
 import urllib3
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import accuracy_score
+from sklearn.model_selection import TimeSeriesSplit
 
-# NBG API SSL 경고 비활성화
+# SSL 경고 비활성화
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# 1. 웹 페이지 기본 레이아웃 설정
-st.set_page_config(
-    page_title="거시경제 환율 예측 대시보드",
-    page_icon="📈",
-    layout="wide"
-)
+# =============================================================================
+# [사용자 설정] 텔레그램 정보 입력
+# =============================================================================
+TELEGRAM_BOT_TOKEN = "8740740753:AAFyJ_T_r4JHJDR_oJEwo01ui68IQHHZAtA" 
+TELEGRAM_CHAT_ID = "5811007750"
 
-st.title("🌐 거시경제 지표 기반 환율 예측 대시보드")
-st.caption("미국 달러 대 원화(USDKRW) 및 조지아 라리화(USDGEL - NBG 공식 연동) 4주 추세 분석 모델")
 
-# 데이터 캐시 비우기 버튼
-if st.sidebar.button("🔄 데이터 캐시 강제 리셋"):
-    st.cache_data.clear()
-    st.rerun()
+# 1. 야후 파이낸스 데이터 수집
+def fetch_yahoo_data(symbol, days=1095):
+    now = datetime.now()
+    start = now - timedelta(days=days)
+    p1, p2 = int(time.mktime(start.timetuple())), int(time.mktime(now.timetuple()))
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?period1={p1}&period2={p2}&interval=1d"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
 
-# 2. 조지아 중앙은행(NBG) 단일 날짜 환율 수집 함수
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        res.raise_for_status()
+        data = res.json()["chart"]["result"][0]
+        timestamps = data.get("timestamp", [])
+        close_prices = data["indicators"]["quote"][0].get("close", [])
+
+        dates = pd.to_datetime(timestamps, unit="s").normalize()
+        s = pd.Series(close_prices, index=dates, name=symbol).dropna()
+        return s[~s.index.duplicated(keep="last")]
+    except Exception as e:
+        print(f"[{symbol}] 야후 데이터 수집 실패: {e}")
+        return None
+
+
+# 2. 조지아 중앙은행(NBG) 주간 데이터 수집
 def fetch_nbg_single_date(dt):
     date_str = dt.strftime("%Y-%m-%d")
     url = f"https://nbg.gov.ge/gw/api/ct/monetarypolicy/currencies/en/json/?date={date_str}"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
-    
+
     try:
         res = requests.get(url, headers=headers, timeout=5, verify=False)
-        if res.status_code == 200:
-            data = res.json()
-            if data and len(data) > 0:
-                for curr in data[0].get("currencies", []):
-                    if curr.get("code") == "USD":
-                        return dt, float(curr["rate"])
+        res.raise_for_status()
+        data = res.json()
+        if data and len(data) > 0:
+            for curr in data[0].get("currencies", []):
+                if curr.get("code") == "USD":
+                    return dt, float(curr["rate"])
     except Exception:
         pass
     return dt, None
 
-# 3. NBG 데이터를 병렬 수집하여 타겟 시계열 인덱스에 맞추는 함수
-def fetch_usdgel_series(target_index):
-    if len(target_index) == 0:
-        return pd.Series(dtype=float)
-        
-    start_date = target_index.min()
-    end_date = target_index.max()
-    
-    # 3일 간격 샘플링으로 빠른 병렬 데이터 수집
-    sample_dates = pd.date_range(start=start_date, end=end_date, freq="3D")
-    
+
+def fetch_nbg_gel_weekly_data(weeks=156):
+    print(f"[USDGEL] NBG 주간 데이터 병렬 수집 중 ({weeks}주)...")
+    weekly_dates = pd.date_range(end=datetime.now(), periods=weeks, freq="W-FRI")
+
     records = {}
     with ThreadPoolExecutor(max_workers=15) as executor:
-        results = executor.map(fetch_nbg_single_date, sample_dates)
+        results = executor.map(fetch_nbg_single_date, weekly_dates)
         for dt, rate in results:
             if rate is not None:
                 records[dt] = rate
 
-    if records:
-        s = pd.Series(records).sort_index()
-        s.index = pd.to_datetime(s.index).tz_localize(None)
-        
-        # 타겟 인덱스 기준으로 시계열 보간(Interpolation) 및 정렬
-        full_idx = s.index.union(target_index)
-        s_interpolated = (
-            s.reindex(full_idx)
-            .interpolate(method="time")
-            .reindex(target_index)
-            .ffill()
-            .bfill()
-        )
-        return s_interpolated
+    if not records:
+        print("[USDGEL] NBG 데이터 수집 실패")
+        return None
 
-    # 비상 예외 시 실시간 기준 환율 API 활용
-    try:
-        url = "https://open.er-api.com/v6/latest/USD"
-        res = requests.get(url, timeout=5).json()
-        base_rate = res.get("rates", {}).get("GEL", 2.70)
-    except Exception:
-        base_rate = 2.70
-    return pd.Series(base_rate, index=target_index)
+    s = pd.Series(records, name="GEL").sort_index()
+    return s.ffill().bfill()
 
-# 4. 전체 마켓 데이터 로드
-@st.cache_data(ttl=600)
-def load_market_data():
-    ticker_map = {
-        'USDKRW': 'KRW=X',
-        'TNX': '^TNX',     # 미 10년물 국채 금리
-        'VIX': '^VIX',     # 변동성 지수
-        'Oil': 'CL=F',      # WTI 원유 선물
-        'SPX': '^GSPC'     # S&P 500 지수
-    }
-    
-    symbols = list(ticker_map.values())
-    raw_data = yf.download(symbols, period="3y", progress=False)['Close']
-    
-    inv_map = {v: k for k, v in ticker_map.items()}
-    df = raw_data.rename(columns=inv_map)
-    df.index = pd.to_datetime(df.index).tz_localize(None)
-    
-    # 조지아 중앙은행(NBG) 실제 라리화 환율 시계열 결합
-    df['USDGEL'] = fetch_usdgel_series(df.index)
-    
-    # 결측치 최종 보완
-    df = df.interpolate(method='time', limit_direction='both').ffill().bfill()
-    return df
 
-# 5. AI 모델 학습 및 예측 함수
-def train_and_predict(data, target_symbol):
-    df = data.copy()
-    
-    df['TNX_Ret_4W'] = df['TNX'].pct_change(20)
-    df['VIX_Level'] = df['VIX']
-    df['Oil_Ret_4W'] = df['Oil'].pct_change(20)
-    df['SPX_Ret_4W'] = df['SPX'].pct_change(20)
-    
-    df['Target'] = (df[target_symbol].shift(-20) > df[target_symbol]).astype(int)
-    
-    features = ['TNX_Ret_4W', 'VIX_Level', 'Oil_Ret_4W', 'SPX_Ret_4W']
-    df_model = df[features + ['Target']].dropna()
-    
-    X = df_model[features]
-    y = df_model['Target']
-    
-    n_samples = len(X)
-    feature_labels = ['10Y Yield', 'VIX Index', 'WTI Oil', 'S&P 500']
-    
-    if n_samples < 10 or len(np.unique(y)) < 2:
-        return 0.5, 0.50, pd.Series([0.25]*4, index=feature_labels)
-        
-    n_splits = min(3, max(2, n_samples // 30))
-    tscv = TimeSeriesSplit(n_splits=n_splits)
-    model = RandomForestClassifier(n_estimators=100, random_state=42, max_depth=5)
-    
-    scores = []
+# 3. RSI 계산
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).ewm(alpha=1 / period, adjust=False).mean()
+    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1 / period, adjust=False).mean()
+    rs = gain / (loss + 1e-9)
+    return 100 - (100 / (1 + rs))
+
+
+# 4. 머신러닝 예측 모듈
+def analyze_currency_enhanced(df_weekly, currency_col, horizon=4):
+    df = df_weekly.copy()
+
+    df[f"{currency_col}_Ret_4W"] = df[currency_col].pct_change(horizon)
+    df[f"{currency_col}_MA12_Ratio"] = (
+        df[currency_col] / df[currency_col].rolling(12).mean() - 1
+    )
+    df[f"{currency_col}_MA24_Ratio"] = (
+        df[currency_col] / df[currency_col].rolling(24).mean() - 1
+    )
+    df[f"{currency_col}_RSI14"] = calculate_rsi(df[currency_col], period=14)
+    df[f"{currency_col}_Vol12W"] = (
+        df[currency_col].pct_change().rolling(12).std()
+    )
+
+    df["DXY_Ret_4W"] = df["DXY"].pct_change(horizon)
+    df["SPX_Ret_4W"] = df["SPX"].pct_change(horizon)
+    df["TNX_Ret_4W"] = df["TNX"].pct_change(horizon)
+    df["TNX_Level"] = df["TNX"]
+    df["OIL_Ret_4W"] = df["OIL"].pct_change(horizon)
+    df["VIX_Level"] = df["VIX"]
+    df["VIX_Change_4W"] = df["VIX"].pct_change(horizon)
+
+    df["Target_4W"] = (df[currency_col].shift(-horizon) > df[currency_col]).astype(int)
+
+    feature_cols = [
+        f"{currency_col}_Ret_4W",
+        f"{currency_col}_MA12_Ratio",
+        f"{currency_col}_MA24_Ratio",
+        f"{currency_col}_RSI14",
+        f"{currency_col}_Vol12W",
+        "DXY_Ret_4W",
+        "SPX_Ret_4W",
+        "TNX_Ret_4W",
+        "TNX_Level",
+        "OIL_Ret_4W",
+        "VIX_Level",
+        "VIX_Change_4W",
+    ]
+
+    df_clean = df.dropna(subset=feature_cols)
+    train_df = df_clean.iloc[:-horizon].dropna()
+
+    X = train_df[feature_cols]
+    y = train_df["Target_4W"]
+
+    tscv = TimeSeriesSplit(n_splits=5)
+    cv_scores = []
+
     for train_idx, test_idx in tscv.split(X):
         X_tr, X_te = X.iloc[train_idx], X.iloc[test_idx]
         y_tr, y_te = y.iloc[train_idx], y.iloc[test_idx]
-        
-        if len(np.unique(y_tr)) >= 2:
-            model.fit(X_tr, y_tr)
-            scores.append(accuracy_score(y_te, model.predict(X_te)))
-        
-    model.fit(X, y)
-    latest_x = X.iloc[[-1]]
+
+        m = RandomForestClassifier(n_estimators=100, max_depth=3, random_state=42)
+        m.fit(X_tr, y_tr)
+        preds = m.predict(X_te)
+        cv_scores.append(accuracy_score(y_te, preds))
+
+    avg_acc = np.mean(cv_scores)
+
+    final_model = RandomForestClassifier(n_estimators=100, max_depth=3, random_state=42)
+    final_model.fit(X, y)
+
+    latest_X = df_clean[feature_cols].iloc[[-1]]
+    latest_close = df_clean[currency_col].iloc[-1]
+
+    probs = final_model.predict_proba(latest_X)[0]
+    classes = list(final_model.classes_)
+    up_prob = probs[classes.index(1)] * 100 if 1 in classes else 0.0
+
+    importances = pd.Series(
+        final_model.feature_importances_, index=feature_cols
+    ).sort_values(ascending=False)
+
+    return latest_close, avg_acc, up_prob, importances, df_clean
+
+
+# 5. 텔레그램 전송 함수
+def send_telegram_report(bot_token, chat_id, report_text, image_path="dashboard.png"):
+    if not bot_token or not chat_id or "여기에_" in bot_token or "여기에_" in chat_id:
+        print("\n[텔레그램 전송 건너뜀] BOT_TOKEN 또는 CHAT_ID가 올바르게 설정되지 않았습니다.")
+        return
+
+    print("\n텔레그램 전송 중...")
+
+    text_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    try:
+        res_text = requests.post(
+            text_url, data={"chat_id": chat_id, "text": report_text}, timeout=10
+        )
+        if not res_text.ok:
+            print(f"\n[텔레그램 서버 응답 오류 상세]: {res_text.text}")
+            res_text.raise_for_status()
+
+        photo_url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
+        with open(image_path, "rb") as photo:
+            res_photo = requests.post(
+                photo_url,
+                data={"chat_id": chat_id},
+                files={"photo": photo},
+                timeout=20,
+            )
+            if not res_photo.ok:
+                print(f"\n[텔레그램 이미지 응답 오류 상세]: {res_photo.text}")
+                res_photo.raise_for_status()
+
+        print("[성공] 텔레그램 메세지 및 대시보드 차트가 정상 전송되었습니다.")
+    except Exception as e:
+        print(f"[오류] 텔레그램 전송 실패: {e}")
+
+
+# 6. 메인 실행 함수
+def main():
+    os_name = platform.system()
+    plt.rc(
+        "font",
+        family=(
+            "Malgun Gothic"
+            if os_name == "Windows"
+            else "AppleGothic"
+            if os_name == "Darwin"
+            else "NanumGothic"
+        ),
+    )
+    plt.rcParams["axes.unicode_minus"] = False
+
+    print("확장 매크로 및 글로벌 데이터 수집 중...")
+    krw = fetch_yahoo_data("USDKRW=X", 1095)
+    gel = fetch_nbg_gel_weekly_data(weeks=156)
+    dxy = fetch_yahoo_data("DX-Y.NYB", 1095)
+    spx = fetch_yahoo_data("^GSPC", 1095)
+    tnx = fetch_yahoo_data("^TNX", 1095)
+    oil = fetch_yahoo_data("CL=F", 1095)
+    vix = fetch_yahoo_data("^VIX", 1095)
+
+    if any(v is None or len(v) == 0 for v in [krw, gel, dxy, spx, tnx, oil, vix]):
+        print("[오류] 필수 데이터 수집에 실패했습니다.")
+        return
+
+    krw_w = krw.resample("W-FRI").last()
+    dxy_w = dxy.resample("W-FRI").last()
+    spx_w = spx.resample("W-FRI").last()
+    tnx_w = tnx.resample("W-FRI").last()
+    oil_w = oil.resample("W-FRI").last()
+    vix_w = vix.resample("W-FRI").last()
+
+    df_weekly = (
+        pd.DataFrame(
+            {
+                "KRW": krw_w,
+                "GEL": gel,
+                "DXY": dxy_w,
+                "SPX": spx_w,
+                "TNX": tnx_w,
+                "OIL": oil_w,
+                "VIX": vix_w,
+            }
+        )
+        .ffill()
+        .bfill()
+        .dropna()
+    )
+
+    krw_close, krw_acc, krw_prob, krw_imp, df_krw = analyze_currency_enhanced(
+        df_weekly, "KRW"
+    )
+    gel_close, gel_acc, gel_prob, gel_imp, df_gel = analyze_currency_enhanced(
+        df_weekly, "GEL"
+    )
+
+    # 텍스트 리포트 생성
+    report_text = f"""==================================================
+ [고도화 매크로/기술적 지표 결합 1개월 환율 예측 리포트]
+==================================================
+1. 한국 원화 (USDKRW)
+   - 현재 환율: {krw_close:.2f}원
+   - 시계열 교차검증 평균 적중률: {krw_acc * 100:.1f}%
+   - 향후 1개월 내 상승 확률: {krw_prob:.1f}%
+   - 추세 시그널: {'[상승 추세 (Bullish)]' if krw_prob >= 50 else '[하락 추세 지속 (Bearish)]'}
+--------------------------------------------------
+2. 조지아 라리화 (USDGEL - NBG 실시간 공식 연동)
+   - 현재 환율: {gel_close:.4f} GEL
+   - 시계열 교차검증 평균 적중률: {gel_acc * 100:.1f}%
+   - 향후 1개월 내 상승 확률: {gel_prob:.1f}%
+   - 추세 시그널: {'[상승 추세 (Bullish)]' if gel_prob >= 50 else '[하락 추세 지속 (Bearish)]'}
+=================================================="""
+
+    print("\n" + report_text + "\n")
+
+    # 8종 확장 대시보드 그래프 생성 (4행 2열)
+    fig, axes = plt.subplots(4, 2, figsize=(16, 16))
+    fig.suptitle(
+        "다중 통화 1개월 추세 예측 및 매크로 종합 분석 대시보드",
+        fontsize=16,
+        fontweight="bold",
+        y=0.99,
+    )
+
+    # 1) USDKRW 추이
+    axes[0, 0].plot(df_weekly.index, df_weekly["KRW"], color="black", lw=2, label="USDKRW 실제 환율")
+    axes[0, 0].plot(df_weekly.index, df_weekly["KRW"].rolling(12).mean(), color="orange", ls="--", label="MA12")
+    axes[0, 0].set_title(f"USDKRW (적중률: {krw_acc * 100:.1f}%, 상승확률: {krw_prob:.1f}%)")
+    axes[0, 0].grid(True, alpha=0.3)
+    axes[0, 0].legend(loc="upper left")
+
+    # 2) USDGEL 추이
+    axes[0, 1].plot(df_weekly.index, df_weekly["GEL"], color="navy", lw=2, label="USDGEL 실제 환율")
+    axes[0, 1].plot(df_weekly.index, df_weekly["GEL"].rolling(12).mean(), color="red", ls="--", label="MA12")
+    axes[0, 1].set_title(f"USDGEL (적중률: {gel_acc * 100:.1f}%, 상승확률: {gel_prob:.1f}%)")
+    axes[0, 1].grid(True, alpha=0.3)
+    axes[0, 1].legend(loc="upper left")
+
+    # 3) KRW 중요도
+    top_krw_imp = krw_imp.head(6)
+    axes[1, 0].barh(top_krw_imp.index[::-1], top_krw_imp.values[::-1] * 100, color="teal")
+    axes[1, 0].set_title("USDKRW 예측 기여 변수 Top 6 (%)")
+    axes[1, 0].grid(True, alpha=0.3, axis="x")
+
+    # 4) GEL 중요도
+    top_gel_imp = gel_imp.head(6)
+    axes[1, 1].barh(top_gel_imp.index[::-1], top_gel_imp.values[::-1] * 100, color="darkslateblue")
+    axes[1, 1].set_title("USDGEL 예측 기여 변수 Top 6 (%)")
+    axes[1, 1].grid(True, alpha=0.3, axis="x")
+
+    # 5) 글로벌 매크로 지표 추이 (Oil, TNX, VIX)
+    ax_oil = axes[2, 0]
+    ax_tnx = ax_oil.twinx()
+    ax_vix = ax_oil.twinx()
+    ax_vix.spines["right"].set_position(("outward", 55))
+
+    l1 = ax_oil.plot(df_weekly.index, df_weekly["OIL"], color="green", alpha=0.8, label="WTI 유가($)")
+    l2 = ax_tnx.plot(df_weekly.index, df_weekly["TNX"], color="blue", alpha=0.8, lw=1.8, label="미10년물 금리(%)")
+    l3 = ax_vix.plot(df_weekly.index, df_weekly["VIX"], color="crimson", ls=":", alpha=0.8, label="VIX 공포지수")
+
+    ax_oil.set_ylabel("WTI 유가 ($)", color="green")
+    ax_tnx.set_ylabel("미10년물 금리 (%)", color="blue")
+    ax_vix.set_ylabel("VIX 지수", color="crimson")
+
+    ax_oil.tick_params(axis="y", labelcolor="green")
+    ax_tnx.tick_params(axis="y", labelcolor="blue")
+    ax_vix.tick_params(axis="y", labelcolor="crimson")
+
+    lines = l1 + l2 + l3
+    labels = [l.get_label() for l in lines]
+    ax_oil.legend(lines, labels, loc="upper left")
+    ax_oil.set_title("글로벌 주요 매크로 지표 추이 (개별 스케일 적용)")
+    ax_oil.grid(True, alpha=0.3)
+
+    # 6) RSI
+    axes[2, 1].plot(df_krw.index, df_krw["KRW_RSI14"], color="black", label="원화 RSI(14)")
+    axes[2, 1].plot(df_gel.index, df_gel["GEL_RSI14"], color="navy", label="라리화 RSI(14)")
+    axes[2, 1].axhline(70, color="red", ls="--", alpha=0.5)
+    axes[2, 1].axhline(30, color="blue", ls="--", alpha=0.5)
+    axes[2, 1].set_title("RSI 과매수(70 이상) / 과매도(30 이하) 보조지표")
+    axes[2, 1].grid(True, alpha=0.3)
+    axes[2, 1].legend(loc="upper left")
+
+    # 7) [신규 추가] DXY & S&P 500 추이
+    ax_dxy = axes[3, 0]
+    ax_spx = ax_dxy.twinx()
     
-    classes = list(model.classes_)
-    if 1 in classes:
-        idx_1 = classes.index(1)
-        prob_up = model.predict_proba(latest_x)[0][idx_1]
-    else:
-        prob_up = 0.0
-        
-    accuracy = np.mean(scores) if scores else 0.50
-    feature_imp = pd.Series(model.feature_importances_, index=feature_labels)
+    l_dxy = ax_dxy.plot(df_weekly.index, df_weekly["DXY"], color="purple", lw=1.8, label="달러 인덱스 (DXY)")
+    l_spx = ax_spx.plot(df_weekly.index, df_weekly["SPX"], color="darkgreen", ls="--", lw=1.5, label="S&P 500 지수")
     
-    return prob_up, accuracy, feature_imp
-
-# 6. 화면 출력
-with st.spinner("조지아 중앙은행(NBG) 및 글로벌 마켓 데이터 수집 중..."):
-    df = load_market_data()
-    krw_prob, krw_acc, krw_imp = train_and_predict(df, 'USDKRW')
-    gel_prob, gel_acc, gel_imp = train_and_predict(df, 'USDGEL')
-
-# KPI 요약 카드
-st.subheader("📌 4주 후 환율 방향성 AI 예측 확률")
-c1, c2, c3, c4 = st.columns(4)
-
-curr_krw = df['USDKRW'].iloc[-1]
-curr_gel = df['USDGEL'].iloc[-1]
-
-c1.metric("현재 USDKRW", f"{curr_krw:,.2f} 원")
-c2.metric("USDKRW(환율) 상승 확률", f"{krw_prob*100:.1f}%", delta=f"검증 정확도 {krw_acc*100:.1f}%")
-
-c3.metric("현재 USDGEL (NBG)", f"{curr_gel:,.4f} GEL")
-c4.metric("USDGEL(환율) 상승 확률", f"{gel_prob*100:.1f}%", delta=f"검증 정확도 {gel_acc*100:.1f}%")
-
-st.markdown("---")
-
-# 타겟 환율 추이 그래프
-st.subheader("📈 타겟 환율 추이 (최근 6개월)")
-col_fx1, col_fx2 = st.columns(2)
-
-recent_df = df.iloc[-120:]
-
-with col_fx1:
-    fig_krw, ax_krw = plt.subplots(figsize=(6, 3))
-    ax_krw.plot(recent_df.index, recent_df['USDKRW'], color='#1f77b4', linewidth=1.8)
-    ax_krw.set_title("USDKRW (KRW/USD)", fontsize=11, pad=8)
-    ax_krw.grid(True, linestyle='--', alpha=0.5)
+    ax_dxy.set_ylabel("DXY Index", color="purple")
+    ax_spx.set_ylabel("S&P 500 Index", color="darkgreen")
+    ax_dxy.tick_params(axis="y", labelcolor="purple")
+    ax_spx.tick_params(axis="y", labelcolor="darkgreen")
     
-    valid_krw = recent_df['USDKRW'].dropna()
-    if not valid_krw.empty:
-        ax_krw.set_ylim(valid_krw.min() * 0.98, valid_krw.max() * 1.02)
-            
-    fig_krw.autofmt_xdate(rotation=30)
-    fig_krw.tight_layout()
-    st.pyplot(fig_krw)
+    lines_dxy = l_dxy + l_spx
+    labels_dxy = [l.get_label() for l in lines_dxy]
+    ax_dxy.legend(lines_dxy, labels_dxy, loc="upper left")
+    ax_dxy.set_title("글로벌 달러 강세(DXY) 및 미국 증시(S&P 500) 추이")
+    ax_dxy.grid(True, alpha=0.3)
 
-with col_fx2:
-    fig_gel, ax_gel = plt.subplots(figsize=(6, 3))
-    ax_gel.plot(recent_df.index, recent_df['USDGEL'], color='#ff7f0e', linewidth=1.8)
-    ax_gel.set_title("USDGEL (National Bank of Georgia)", fontsize=11, pad=8)
-    ax_gel.grid(True, linestyle='--', alpha=0.5)
+    # 8) [신규 추가] 12주 이동 연율화 변동성 비교
+    krw_vol = df_weekly["KRW"].pct_change().rolling(12).std() * np.sqrt(52) * 100
+    gel_vol = df_weekly["GEL"].pct_change().rolling(12).std() * np.sqrt(52) * 100
     
-    valid_gel = recent_df['USDGEL'].dropna()
-    if not valid_gel.empty:
-        g_min, g_max = valid_gel.min(), valid_gel.max()
-        if g_min == g_max:
-            ax_gel.set_ylim(g_min * 0.98, g_max * 1.02)
-        else:
-            ax_gel.set_ylim(g_min * 0.995, g_max * 1.005)
-                
-    fig_gel.autofmt_xdate(rotation=30)
-    fig_gel.tight_layout()
-    st.pyplot(fig_gel)
+    axes[3, 1].plot(df_weekly.index, krw_vol, color="black", lw=1.5, label="원화 변동성 (%)")
+    axes[3, 1].plot(df_weekly.index, gel_vol, color="navy", lw=1.5, label="라리화 변동성 (%)")
+    axes[3, 1].set_title("12주 이동 연율화 변동성 (%) 비교")
+    axes[3, 1].grid(True, alpha=0.3)
+    axes[3, 1].legend(loc="upper left")
 
-st.markdown("---")
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
 
-# 주요 매크로 지표 추이
-st.subheader("📊 주요 매크로 지표 추이 (독립 Y축 그래프)")
-st.caption("🟦 **파란색 (좌측 Y축)**: 미 10년물 국채 금리 (TNX) | 🟧 **주황색 점선 (우측1 Y축)**: VIX 변동성 지수 | 🟩 **초록색 점선 (우측2 Y축)**: WTI 원유 가격 ($)")
+    image_filename = "dashboard.png"
+    plt.savefig(image_filename, dpi=300, bbox_inches="tight")
 
-fig, ax1 = plt.subplots(figsize=(12, 4.5))
+    send_telegram_report(
+        TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, report_text, image_filename
+    )
 
-color1 = '#1f77b4'
-ax1.set_xlabel('Date')
-ax1.set_ylabel('US 10Y Treasury (%)', color=color1)
-line1 = ax1.plot(recent_df.index, recent_df['TNX'], color=color1, label='US 10Y Yield (TNX)', linewidth=2)
-ax1.tick_params(axis='y', labelcolor=color1)
+    plt.show()
 
-ax2 = ax1.twinx()
-color2 = '#ff7f0e'
-ax2.set_ylabel('VIX Index', color=color2)
-line2 = ax2.plot(recent_df.index, recent_df['VIX'], color=color2, label='VIX Index', linewidth=1.5, linestyle='--')
-ax2.tick_params(axis='y', labelcolor=color2)
 
-ax3 = ax1.twinx()
-ax3.spines["right"].set_position(("axes", 1.12))
-color3 = '#2ca02c'
-ax3.set_ylabel('WTI Oil ($/bbl)', color=color3)
-line3 = ax3.plot(recent_df.index, recent_df['Oil'], color=color3, label='WTI Oil ($)', linewidth=1.5, linestyle=':')
-ax3.tick_params(axis='y', labelcolor=color3)
-
-lines = line1 + line2 + line3
-labels = [l.get_label() for l in lines]
-ax1.legend(lines, labels, loc='upper left', frameon=True, facecolor='white', framealpha=0.9)
-
-plt.title("Recent 6-Month Macro Trends (TNX, VIX, WTI Oil)", fontsize=12, pad=10)
-fig.tight_layout()
-
-st.pyplot(fig)
-
-# 변수 중요도 분석
-st.subheader("🔍 변수 중요도 분석 (Feature Importance)")
-col_a, col_b = st.columns(2)
-
-with col_a:
-    st.write("**USDKRW 영향 변수**")
-    st.bar_chart(krw_imp)
-
-with col_b:
-    st.write("**USDGEL 영향 변수**")
-    st.bar_chart(gel_imp)
-
-st.caption("데이터 출처: Yahoo Finance & National Bank of Georgia (NBG) | 매시간 자동으로 최신 시장 데이터를 수집하여 업데이트합니다.")
+if __name__ == "__main__":
+    main()
