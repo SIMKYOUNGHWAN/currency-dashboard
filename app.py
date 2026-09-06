@@ -111,17 +111,41 @@ c4.metric("USDGEL(환율) 상승 확률", f"{gel_prob*100:.1f}%", delta=f"검증
 
 st.markdown("---")
 
-# 추가 1: 실제 대상 환율 추이 그래프 (최근 6개월)
+# 동적 Y축 스케일링이 적용된 환율 추이 그래프
 st.subheader("📈 타겟 환율 추이 (최근 6개월)")
 col_fx1, col_fx2 = st.columns(2)
 
+recent_df = df.iloc[-120:] # 최근 6개월(120영업일)
+
 with col_fx1:
-    st.write("**USDKRW (원/달러)**")
-    st.line_chart(df['USDKRW'].iloc[-120:], color="#1f77b4")
+    fig_krw, ax_krw = plt.subplots(figsize=(6, 3))
+    ax_krw.plot(recent_df.index, recent_df['USDKRW'], color='#1f77b4', linewidth=1.8)
+    ax_krw.set_title("USDKRW (KRW/USD)", fontsize=11, pad=8)
+    ax_krw.grid(True, linestyle='--', alpha=0.5)
+    
+    # Y축 여백 자동 맞춤 (최솟값 -2%, 최댓값 +2%)
+    krw_min, krw_max = recent_df['USDKRW'].min(), recent_df['USDKRW'].max()
+    ax_krw.set_ylim(krw_min * 0.98, krw_max * 1.02)
+    fig_krw.autofmt_xdate(rotation=30)
+    fig_krw.tight_layout()
+    st.pyplot(fig_krw)
 
 with col_fx2:
-    st.write("**USDGEL (라리/달러)**")
-    st.line_chart(df['USDGEL'].iloc[-120:], color="#ff7f0e")
+    fig_gel, ax_gel = plt.subplots(figsize=(6, 3))
+    ax_gel.plot(recent_df.index, recent_df['USDGEL'], color='#ff7f0e', linewidth=1.8)
+    ax_gel.set_title("USDGEL (GEL/USD)", fontsize=11, pad=8)
+    ax_gel.grid(True, linestyle='--', alpha=0.5)
+    
+    # Y축 여백 자동 맞춤 (GEL 미세 변동 확대)
+    gel_min, gel_max = recent_df['USDGEL'].min(), recent_df['USDGEL'].max()
+    if gel_min == gel_max:
+        ax_gel.set_ylim(gel_min * 0.95, gel_max * 1.05)
+    else:
+        ax_gel.set_ylim(gel_min * 0.995, gel_max * 1.005)
+        
+    fig_gel.autofmt_xdate(rotation=30)
+    fig_gel.tight_layout()
+    st.pyplot(fig_gel)
 
 st.markdown("---")
 
@@ -133,20 +157,20 @@ fig, ax1 = plt.subplots(figsize=(12, 4.5))
 color1 = '#1f77b4'
 ax1.set_xlabel('Date')
 ax1.set_ylabel('US 10Y Treasury (%)', color=color1)
-ax1.plot(df.index[-120:], df['TNX'].iloc[-120:], color=color1, label='TNX (%)', linewidth=2)
+ax1.plot(recent_df.index, recent_df['TNX'], color=color1, label='TNX (%)', linewidth=2)
 ax1.tick_params(axis='y', labelcolor=color1)
 
 ax2 = ax1.twinx()
 color2 = '#ff7f0e'
 ax2.set_ylabel('VIX Index', color=color2)
-ax2.plot(df.index[-120:], df['VIX'].iloc[-120:], color=color2, label='VIX', linewidth=1.5, linestyle='--')
+ax2.plot(recent_df.index, recent_df['VIX'], color=color2, label='VIX', linewidth=1.5, linestyle='--')
 ax2.tick_params(axis='y', labelcolor=color2)
 
 ax3 = ax1.twinx()
 ax3.spines["right"].set_position(("axes", 1.12))
 color3 = '#2ca02c'
 ax3.set_ylabel('WTI Oil ($/bbl)', color=color3)
-ax3.plot(df.index[-120:], df['Oil'].iloc[-120:], color=color3, label='WTI Oil ($)', linewidth=1.5, linestyle=':')
+ax3.plot(recent_df.index, recent_df['Oil'], color=color3, label='WTI Oil ($)', linewidth=1.5, linestyle=':')
 ax3.tick_params(axis='y', labelcolor=color3)
 
 plt.title("Recent 6-Month Macro Trends (TNX, VIX, WTI Oil)", fontsize=12, pad=10)
