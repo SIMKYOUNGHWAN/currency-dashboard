@@ -47,7 +47,7 @@ if st.sidebar.button("🔄 데이터 캐시 강제 리셋"):
     st.cache_data.clear()
     st.rerun()
 
-# 3. 보조지표 계산 함수 (RSI) - 상단에 정의
+# 3. 보조지표 계산 함수 (RSI)
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).ewm(alpha=1/period, adjust=False).mean()
@@ -114,14 +114,14 @@ def fetch_usdgel_series(target_index):
         base_rate = 2.70
     return pd.Series(base_rate, index=target_index)
 
-# 6. 전체 마켓 데이터 로드 (반도체 지수 SOX 추가)
+# 6. 전체 마켓 데이터 로드 (최근 3년)
 @st.cache_data(ttl=600)
 def load_market_data():
     ticker_map = {
         'USDKRW': 'KRW=X',
         'TNX': '^TNX',     # 미 10년물 국채 금리
         'VIX': '^VIX',     # 변동성 지수
-        'Oil': 'CL=F',     # WTI 원유 선물 (수입 부담)
+        'Oil': 'CL=F',     # WTI 원유 선물
         'SPX': '^GSPC',    # S&P 500 지수
         'DXY': 'DX-Y.NYB', # 달러 인덱스
         'SOX': '^SOX'      # 필라델피아 반도체 지수 (수출 여건 대리 지표)
@@ -140,18 +140,18 @@ def load_market_data():
 
 # 7. AI 모델 학습 및 예측 함수
 def train_and_predict(data, target_symbol):
-    df = data.copy()
+    df_temp = data.copy()
     
-    df['TNX_Ret_4W'] = df['TNX'].pct_change(20)
-    df['VIX_Level'] = df['VIX']
-    df['Oil_Ret_4W'] = df['Oil'].pct_change(20)
-    df['SPX_Ret_4W'] = df['SPX'].pct_change(20)
-    df['DXY_Ret_4W'] = df['DXY'].pct_change(20)
+    df_temp['TNX_Ret_4W'] = df_temp['TNX'].pct_change(20)
+    df_temp['VIX_Level'] = df_temp['VIX']
+    df_temp['Oil_Ret_4W'] = df_temp['Oil'].pct_change(20)
+    df_temp['SPX_Ret_4W'] = df_temp['SPX'].pct_change(20)
+    df_temp['DXY_Ret_4W'] = df_temp['DXY'].pct_change(20)
     
-    df['Target'] = (df[target_symbol].shift(-20) > df[target_symbol]).astype(int)
+    df_temp['Target'] = (df_temp[target_symbol].shift(-20) > df_temp[target_symbol]).astype(int)
     
     features = ['TNX_Ret_4W', 'VIX_Level', 'Oil_Ret_4W', 'SPX_Ret_4W', 'DXY_Ret_4W']
-    df_model = df[features + ['Target']].dropna()
+    df_model = df_temp[features + ['Target']].dropna()
     
     X = df_model[features]
     y = df_model['Target']
@@ -196,6 +196,18 @@ with st.spinner("조지아 중앙은행(NBG) 및 글로벌 마켓 데이터 수�
     krw_prob, krw_acc, krw_imp = train_and_predict(df, 'USDKRW')
     gel_prob, gel_acc, gel_imp = train_and_predict(df, 'USDGEL')
 
+# 파생 지표 전체 3년 데이터에 계산
+df['KRW_MA20'] = df['USDKRW'].rolling(20).mean()
+df['KRW_MA60'] = df['USDKRW'].rolling(60).mean()
+df['GEL_MA20'] = df['USDGEL'].rolling(20).mean()
+df['GEL_MA60'] = df['USDGEL'].rolling(60).mean()
+df['Trade_Proxy'] = df['SOX'] / df['Oil']
+
+df['KRW_RSI'] = calculate_rsi(df['USDKRW'], 14)
+df['GEL_RSI'] = calculate_rsi(df['USDGEL'], 14)
+df['KRW_Vol'] = df['USDKRW'].pct_change().rolling(20).std() * np.sqrt(252) * 100
+df['GEL_Vol'] = df['USDGEL'].pct_change().rolling(20).std() * np.sqrt(252) * 100
+
 # KPI 요약 카드
 st.subheader("📌 4주 후 환율 방향성 AI 예측 확률")
 c1, c2, c3, c4 = st.columns(4)
@@ -211,21 +223,15 @@ c4.metric("USDGEL(환율) 상승 확률", f"{gel_prob*100:.1f}%", delta=f"검증
 
 st.markdown("---")
 
-recent_df = df.iloc[-120:].copy()
-recent_df['KRW_MA20'] = recent_df['USDKRW'].rolling(20).mean()
-recent_df['KRW_MA60'] = recent_df['USDKRW'].rolling(60).mean()
-recent_df['GEL_MA20'] = recent_df['USDGEL'].rolling(20).mean()
-recent_df['GEL_MA60'] = recent_df['USDGEL'].rolling(60).mean()
-
-# 1) 타겟 환율 추이 그래프
-st.subheader("📈 타겟 환율 추이 및 이동평균선 (최근 6개월)")
+# 1) 타겟 환율 추이 그래프 (최근 3년 전체)
+st.subheader("📈 타겟 환율 추이 및 이동평균선 (최근 3년)")
 col_fx1, col_fx2 = st.columns(2)
 
 with col_fx1:
     fig_krw, ax_krw = plt.subplots(figsize=(6, 3))
-    ax_krw.plot(recent_df.index, recent_df['USDKRW'], color='black', linewidth=1.8, label='USDKRW')
-    ax_krw.plot(recent_df.index, recent_df['KRW_MA20'], color='orange', linestyle='--', linewidth=1.2, label='MA20')
-    ax_krw.plot(recent_df.index, recent_df['KRW_MA60'], color='red', linestyle=':', linewidth=1.2, label='MA60')
+    ax_krw.plot(df.index, df['USDKRW'], color='black', linewidth=1.5, label='USDKRW')
+    ax_krw.plot(df.index, df['KRW_MA20'], color='orange', linestyle='--', linewidth=1.1, label='MA20')
+    ax_krw.plot(df.index, df['KRW_MA60'], color='red', linestyle=':', linewidth=1.1, label='MA60')
     ax_krw.set_title("USDKRW (KRW/USD)", fontsize=11, pad=8)
     ax_krw.grid(True, linestyle='--', alpha=0.5)
     ax_krw.legend(loc='upper left', fontsize=8)
@@ -235,9 +241,9 @@ with col_fx1:
 
 with col_fx2:
     fig_gel, ax_gel = plt.subplots(figsize=(6, 3))
-    ax_gel.plot(recent_df.index, recent_df['USDGEL'], color='navy', linewidth=1.8, label='USDGEL')
-    ax_gel.plot(recent_df.index, recent_df['GEL_MA20'], color='orange', linestyle='--', linewidth=1.2, label='MA20')
-    ax_gel.plot(recent_df.index, recent_df['GEL_MA60'], color='red', linestyle=':', linewidth=1.2, label='MA60')
+    ax_gel.plot(df.index, df['USDGEL'], color='navy', linewidth=1.5, label='USDGEL')
+    ax_gel.plot(df.index, df['GEL_MA20'], color='orange', linestyle='--', linewidth=1.1, label='MA20')
+    ax_gel.plot(df.index, df['GEL_MA60'], color='red', linestyle=':', linewidth=1.1, label='MA60')
     ax_gel.set_title("USDGEL (National Bank of Georgia)", fontsize=11, pad=8)
     ax_gel.grid(True, linestyle='--', alpha=0.5)
     ax_gel.legend(loc='upper left', fontsize=8)
@@ -247,18 +253,15 @@ with col_fx2:
 
 st.markdown("---")
 
-# 2) [신규 추가] 한국 수출입 여건과 원/달러 환율 메커니즘
-st.subheader("🚢 한국 수출입 무역 여건(Trade Proxy)과 환율 메커니즘")
-st.caption("🟦 **검은색 (좌측 Y축)**: 원/달러 환율 (USDKRW) | 🔴 **파란색 점선 (우측 Y축)**: 무역 여건 지수 (반도체 SOX / WTI 유가)")
-
-# 무역 여건 대리 지수 계산 (반도체지수 / 원유가격)
-recent_df['Trade_Proxy'] = recent_df['SOX'] / recent_df['Oil']
+# 2) 한국 수출입 여건과 원/달러 환율 메커니즘 (최근 3년 전체)
+st.subheader("🚢 한국 수출입 무역 여건(Trade Proxy)과 환율 메커니즘 (최근 3년)")
+st.caption("⬛ **검은색 (좌측 Y축)**: 원/달러 환율 (USDKRW) | 🟦 **파란색 점선 (우측 Y축)**: 무역 여건 지수 (반도체 SOX / WTI 유가)")
 
 fig_trade, ax_krw_t = plt.subplots(figsize=(12, 4))
 ax_trade = ax_krw_t.twinx()
 
-line_krw = ax_krw_t.plot(recent_df.index, recent_df['USDKRW'], color='black', label='USDKRW Exchange Rate', linewidth=1.8)
-line_trade = ax_trade.plot(recent_df.index, recent_df['Trade_Proxy'], color='dodgerblue', linestyle='--', label='Trade Proxy Index (SOX/Oil)', linewidth=1.8)
+line_krw = ax_krw_t.plot(df.index, df['USDKRW'], color='black', label='USDKRW Exchange Rate', linewidth=1.5)
+line_trade = ax_trade.plot(df.index, df['Trade_Proxy'], color='dodgerblue', linestyle='--', label='Trade Proxy Index (SOX/Oil)', linewidth=1.5)
 
 ax_krw_t.set_ylabel('USDKRW Rate', color='black')
 ax_trade.set_ylabel('Trade Proxy (SOX / Oil)', color='dodgerblue')
@@ -278,8 +281,8 @@ st.info("💡 **원리 해설**: 무역 여건 지수(파란 점선)가 상승�
 
 st.markdown("---")
 
-# 3) 주요 매크로 지표 추이
-st.subheader("📊 주요 매크로 지표 추이 (독립 Y축 그래프)")
+# 3) 주요 매크로 지표 추이 (최근 3년 전체 - 이미지와 동일)
+st.subheader("📊 주요 매크로 지표 추이 (최근 3년)")
 st.caption("🟦 **파란색 (좌측 Y축)**: 미 10년물 국채 금리 (TNX) | 🟧 **주황색 점선 (우측1 Y축)**: VIX 변동성 지수 | 🟩 **초록색 점선 (우측2 Y축)**: WTI 원유 가격 ($)")
 
 fig, ax1 = plt.subplots(figsize=(12, 4))
@@ -287,20 +290,20 @@ fig, ax1 = plt.subplots(figsize=(12, 4))
 color1 = '#1f77b4'
 ax1.set_xlabel('Date')
 ax1.set_ylabel('US 10Y Treasury (%)', color=color1)
-line1 = ax1.plot(recent_df.index, recent_df['TNX'], color=color1, label='US 10Y Yield (TNX)', linewidth=2)
+line1 = ax1.plot(df.index, df['TNX'], color=color1, label='US 10Y Yield (TNX)', linewidth=1.5)
 ax1.tick_params(axis='y', labelcolor=color1)
 
 ax2 = ax1.twinx()
 color2 = '#ff7f0e'
 ax2.set_ylabel('VIX Index', color=color2)
-line2 = ax2.plot(recent_df.index, recent_df['VIX'], color=color2, label='VIX Index', linewidth=1.5, linestyle='--')
+line2 = ax2.plot(df.index, df['VIX'], color=color2, label='VIX Index', linewidth=1.2, linestyle='--')
 ax2.tick_params(axis='y', labelcolor=color2)
 
 ax3 = ax1.twinx()
 ax3.spines["right"].set_position(("axes", 1.12))
 color3 = '#2ca02c'
 ax3.set_ylabel('WTI Oil ($/bbl)', color=color3)
-line3 = ax3.plot(recent_df.index, recent_df['Oil'], color=color3, label='WTI Oil ($)', linewidth=1.5, linestyle=':')
+line3 = ax3.plot(df.index, df['Oil'], color=color3, label='WTI Oil ($)', linewidth=1.2, linestyle=':')
 ax3.tick_params(axis='y', labelcolor=color3)
 
 lines = line1 + line2 + line3
@@ -314,8 +317,8 @@ st.pyplot(fig)
 
 st.markdown("---")
 
-# 4) 달러 인덱스 & 미국 증시 추이
-st.subheader("💵 달러 인덱스 (DXY) 및 미국 증시 (S&P 500) 추이")
+# 4) 달러 인덱스 & 미국 증시 추이 (최근 3년 전체 - 이미지와 동일)
+st.subheader("💵 달러 인덱스 (DXY) 및 미국 증시 (S&P 500) 추이 (최근 3년)")
 st.caption("🟪 **보라색 (좌측 Y축)**: 달러 인덱스 (DXY) | 🌲 **진초록색 점선 (우측 Y축)**: S&P 500 지수")
 
 fig_dxy, ax_dxy = plt.subplots(figsize=(12, 4))
@@ -324,8 +327,8 @@ ax_spx = ax_dxy.twinx()
 color_dxy = 'purple'
 color_spx = 'darkgreen'
 
-line_dxy = ax_dxy.plot(recent_df.index, recent_df['DXY'], color=color_dxy, label='Dollar Index (DXY)', linewidth=1.8)
-line_spx = ax_spx.plot(recent_df.index, recent_df['SPX'], color=color_spx, linestyle='--', label='S&P 500 Index', linewidth=1.5)
+line_dxy = ax_dxy.plot(df.index, df['DXY'], color=color_dxy, label='Dollar Index (DXY)', linewidth=1.5)
+line_spx = ax_spx.plot(df.index, df['SPX'], color=color_spx, linestyle='--', label='S&P 500 Index', linewidth=1.2)
 
 ax_dxy.set_ylabel('DXY Index', color=color_dxy)
 ax_spx.set_ylabel('S&P 500 Index', color=color_spx)
@@ -342,20 +345,14 @@ st.pyplot(fig_dxy)
 
 st.markdown("---")
 
-# 5) 기술적 보조지표 (RSI & 연율화 변동성)
+# 5) 기술적 보조지표 (최근 3년 전체)
 st.subheader("📉 기술적 보조지표 분석 (RSI & 연율화 변동성)")
 col_rsi, col_vol = st.columns(2)
 
-recent_df['KRW_RSI'] = calculate_rsi(recent_df['USDKRW'], 14)
-recent_df['GEL_RSI'] = calculate_rsi(recent_df['USDGEL'], 14)
-
-recent_df['KRW_Vol'] = recent_df['USDKRW'].pct_change().rolling(20).std() * np.sqrt(252) * 100
-recent_df['GEL_Vol'] = recent_df['USDGEL'].pct_change().rolling(20).std() * np.sqrt(252) * 100
-
 with col_rsi:
     fig_rsi, ax_rsi = plt.subplots(figsize=(6, 3))
-    ax_rsi.plot(recent_df.index, recent_df['KRW_RSI'], color='black', label='KRW RSI(14)')
-    ax_rsi.plot(recent_df.index, recent_df['GEL_RSI'], color='navy', label='GEL RSI(14)')
+    ax_rsi.plot(df.index, df['KRW_RSI'], color='black', linewidth=1.2, label='KRW RSI(14)')
+    ax_rsi.plot(df.index, df['GEL_RSI'], color='navy', linewidth=1.2, label='GEL RSI(14)')
     ax_rsi.axhline(70, color='red', linestyle='--', alpha=0.6, label='Overbought (70)')
     ax_rsi.axhline(30, color='blue', linestyle='--', alpha=0.6, label='Oversold (30)')
     ax_rsi.set_title("RSI (Overbought / Oversold)", fontsize=11, pad=8)
@@ -367,8 +364,8 @@ with col_rsi:
 
 with col_vol:
     fig_vol, ax_vol = plt.subplots(figsize=(6, 3))
-    ax_vol.plot(recent_df.index, recent_df['KRW_Vol'], color='teal', label='KRW Volatility')
-    ax_vol.plot(recent_df.index, recent_df['GEL_Vol'], color='darkslateblue', label='GEL Volatility')
+    ax_vol.plot(df.index, df['KRW_Vol'], color='teal', linewidth=1.2, label='KRW Volatility')
+    ax_vol.plot(df.index, df['GEL_Vol'], color='darkslateblue', linewidth=1.2, label='GEL Volatility')
     ax_vol.set_title("20-Day Annualized Volatility (%)", fontsize=11, pad=8)
     ax_vol.grid(True, linestyle='--', alpha=0.3)
     ax_vol.legend(loc='upper left', fontsize=8)
